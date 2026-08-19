@@ -10,15 +10,17 @@ http://127.0.0.1:8000/docs
 
 ### Endpoints
 
-All endpoints return JSON. Search endpoints accept an optional `limit` (1–100, default 10).
+All endpoints return JSON. List endpoints accept an optional `limit` (1–100, default 10). Artist tracks also accepts `page` (1–1000, default 1).
 
 | Endpoint | Description | Required |
 |---|---|---|
 | `GET /songs/search?query=` | Search songs | `query` |
 | `GET /songs/info?seokey=` | Song details | `seokey` |
 | `GET /albums/search?query=` | Search albums | `query` |
+| `GET /albums/similar/?album_id=` | Similar albums | `album_id` (numeric) |
 | `GET /albums/info?seokey=` | Album details (includes tracks) | `seokey` |
 | `GET /artists/search?query=` | Search artists | `query` |
+| `GET /artists/tracks/?artist_id=` | Tracks by an artist | `artist_id` (numeric) |
 | `GET /artists/info?seokey=` | Artist details (with top tracks) | `seokey` |
 | `GET /artists/similar?artist_id=` | Similar artists | `artist_id` |
 | `GET /trending?language=` | Trending tracks | `language` |
@@ -59,13 +61,25 @@ GET /songs/search?query=tyler herro
 curl "http://127.0.0.1:8000/songs/search?query=tyler+herro&limit=5"
 curl "http://127.0.0.1:8000/songs/info?seokey=tyler-herro"
 curl "http://127.0.0.1:8000/albums/info?seokey=tyler-herro"
+curl "http://127.0.0.1:8000/albums/similar/?album_id=3487503&limit=5"
 curl "http://127.0.0.1:8000/artists/info?seokey=jack-harlow&limit=5&page=1"
+curl "http://127.0.0.1:8000/artists/tracks/?artist_id=817522&limit=5&page=1"
 curl "http://127.0.0.1:8000/artists/similar?artist_id=817522"
 curl "http://127.0.0.1:8000/trending?language=English"
 curl "http://127.0.0.1:8000/newreleases?language=English"
 curl "http://127.0.0.1:8000/charts"
 curl "http://127.0.0.1:8000/playlists/info?seokey=gaana-dj-gaana-international-top-50"
 ```
+
+Similar albums and artist tracks require numeric IDs. Results depend on Gaana's live catalog and the headers accepted by its current website endpoints.
+
+### Discovery endpoints
+
+`GET /albums/similar/` requires a numeric Gaana `album_id` and returns normalized album records. The album must exist in Gaana's current catalog; otherwise the API returns a 404 no-results response.
+
+`GET /artists/tracks/` requires a numeric `artist_id` and returns a paginated object containing `tracks` and `total`. Use `limit` for the number of tracks per page and `page` to select the page. Track records include the same metadata and `stream_urls` fields as `/songs/search/`.
+
+These endpoints depend on Gaana's live catalog and current website request headers, so results may change or be unavailable for individual IDs.
 
 ### Example response
 

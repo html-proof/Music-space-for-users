@@ -155,6 +155,31 @@ async def artists_similar(
         raise HTTPException(status_code=404, detail=similar_artists["error"])
     return similar_artists
 
+@app.get("/albums/similar/", summary="Retrieve similar albums.")
+async def albums_similar(
+    album_id: str = Query(..., min_length=1, max_length=MAX_ARTIST_ID_LENGTH,
+                          pattern=ARTIST_ID_PATTERN,
+                          description="The numeric album ID."),
+    limit: Optional[int] = Query(DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+):
+    result = await gaanapy.get_similar_albums(album_id, limit)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+@app.get("/artists/tracks/", summary="Retrieve an artist's tracks.")
+async def artists_tracks(
+    artist_id: str = Query(..., min_length=1, max_length=MAX_ARTIST_ID_LENGTH,
+                           pattern=ARTIST_ID_PATTERN,
+                           description="The numeric artist ID."),
+    limit: Optional[int] = Query(DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT),
+    page: Optional[int] = Query(DEFAULT_PAGE, ge=MIN_PAGE, le=MAX_PAGE)
+):
+    result = await gaanapy.get_artist_tracks(artist_id, limit, page)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
 @app.get("/trending", summary="Retrieve trending songs across languages.")
 async def get_trending(
     language: str = Query(..., min_length=1, max_length=MAX_LANGUAGE_LENGTH,

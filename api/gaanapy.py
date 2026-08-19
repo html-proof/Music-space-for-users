@@ -10,8 +10,9 @@ from api.playlists.playlists import Playlists
 from api import endpoints
 from api.functions import Functions
 from api.errors import Errors
+from api.discovery.discovery import Discovery
 
-class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists):
+class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, Discovery):
     def __init__(self):
         self.aiohttp = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30)
