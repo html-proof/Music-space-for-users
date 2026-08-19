@@ -1,6 +1,5 @@
 import binascii
 from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
 import base64
 
 class Functions:
@@ -25,10 +24,25 @@ class Functions:
 
             ## Decrypt ciphertext to get final URL.
             cipher = AES.new(KEY, AES.MODE_CBC, iv)
-            decrypted = unpad(cipher.decrypt(cipher_bytes), self.BLOCK_SIZE)
+            decrypted = cipher.decrypt(cipher_bytes)
+
+            ## Older responses use PKCS#7 padding; current responses may not.
+            padding_length = decrypted[-1]
+            if (
+                1 <= padding_length <= self.BLOCK_SIZE
+                and decrypted.endswith(bytes([padding_length]) * padding_length)
+            ):
+                decrypted = decrypted[:-padding_length]
 
             return decrypted.decode("utf-8")
-        except (IndexError, ValueError, AttributeError, TypeError, binascii.Error):
+        except (
+            IndexError,
+            ValueError,
+            AttributeError,
+            TypeError,
+            UnicodeDecodeError,
+            binascii.Error,
+        ):
             return ""
 
     async def findArtistNames(self, results: list) -> str:

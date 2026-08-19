@@ -1,14 +1,33 @@
 import pytest
+import base64
 from unittest.mock import AsyncMock
+from Crypto.Cipher import AES
 from api.functions import Functions
 from api.errors import Errors
 from api.albums.albums import Albums
+from api.songs.songs import Songs
+from api import endpoints
 
 
 class FakeFormatter(Albums):
     def __init__(self):
         self.functions = AsyncMock(spec=Functions)
         self.errors = AsyncMock(spec=Errors)
+
+
+def encrypted_link(plaintext: str) -> str:
+    key = b'gy1t#b@jl(b$wtme'
+    iv = b'0123456789abcdef'
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return "1" + iv.decode() + base64.b64encode(cipher.encrypt(plaintext.encode())).decode()
+
+
+class AlbumTracksFormatter(Albums, Songs):
+    def __init__(self, responses):
+        self.functions = Functions()
+        self.errors = AsyncMock(spec=Errors)
+        self.api_endpoints = endpoints
+        self._safe_request = AsyncMock(side_effect=responses)
 
 
 @pytest.mark.asyncio
@@ -123,3 +142,23 @@ async def test_format_json_albums_missing_artist_info():
 
     assert result["seokey"] == "test"
     assert result["artists"] == ""
+
+
+@pytest.mark.asyncio
+async def test_format_json_albums_info_includes_unpadded_track_stream_url():
+    stream_url = "https://cdn.gaana.com/hls/64.mp4.master.m3u8?hdnts=deadbeef12345"
+    assert len(stream_url.encode()) % 16 == 0
+    track = {
+        "seokey": "test-track",
+        "urls": {"medium": {"message": encrypted_link(stream_url)}}
+    }
+    formatter = AlbumTracksFormatter([
+        {"tracks": [{"seokey": "test-track"}]},
+        {"tracks": [track]},
+    ])
+
+    result = await formatter.format_json_albums(
+        {"album": {"seokey": "test-album"}}, info=True
+    )
+
+    assert result["tracks"][0]["stream_urls"]["urls"]["medium_quality"] == stream_url

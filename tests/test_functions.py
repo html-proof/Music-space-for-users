@@ -1,7 +1,20 @@
 import pytest
+import base64
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 from api.functions import Functions
 
 functions = Functions()
+
+
+def encrypted_link(plaintext: str, padded: bool) -> str:
+    key = b'gy1t#b@jl(b$wtme'
+    iv = b'0123456789abcdef'
+    payload = plaintext.encode()
+    if padded:
+        payload = pad(payload, 16)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return "1" + iv.decode() + base64.b64encode(cipher.encrypt(payload)).decode()
 
 
 @pytest.mark.asyncio
@@ -14,6 +27,29 @@ async def test_decryptLink_valid():
 
     result = await functions.decryptLink(encrypted_link.strip())
     assert result == decrypted_link.strip()
+
+
+@pytest.mark.asyncio
+async def test_decryptLink_padded_plaintext():
+    link = "https://cdn.gaana.com/song/64.mp4.master.m3u8?token=legacy"
+
+    assert await functions.decryptLink(encrypted_link(link, padded=True)) == link
+
+
+@pytest.mark.asyncio
+async def test_decryptLink_unpadded_block_aligned_plaintext():
+    link = "https://cdn.gaana.com/hls/64.mp4.master.m3u8?hdnts=deadbeef12345"
+    assert len(link.encode()) % 16 == 0
+
+    assert await functions.decryptLink(encrypted_link(link, padded=False)) == link
+
+
+@pytest.mark.asyncio
+async def test_decryptLink_hexadecimal_url_suffix_is_not_padding():
+    link = "https://cdn.gaana.com/hls/64.mp4.master.m3u8?token=0123456789abcdef1234567890123"
+    assert len(link.encode()) % 16 == 0
+
+    assert await functions.decryptLink(encrypted_link(link, padded=False)) == link
 
 
 @pytest.mark.asyncio
