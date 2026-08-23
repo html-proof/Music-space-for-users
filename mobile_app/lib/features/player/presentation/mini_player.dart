@@ -79,9 +79,18 @@ class MiniPlayer extends ConsumerWidget {
                         ],
                       ),
                     ),
-                    IconButton(
-                      icon: Icon(player.isPlaying ? Icons.pause : Icons.play_arrow),
-                      onPressed: player.togglePlayPause,
+                    Container(
+                      width: 34,
+                      height: 34,
+                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                      decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        iconSize: 18,
+                        color: Colors.black,
+                        icon: Icon(player.isPlaying ? Icons.pause : Icons.play_arrow),
+                        onPressed: player.togglePlayPause,
+                      ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.skip_next),

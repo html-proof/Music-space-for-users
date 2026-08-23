@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/models/song.dart';
 import '../../../shared/widgets/async_value_view.dart';
+import '../../../shared/widgets/primary_play_button.dart';
 import '../../../shared/widgets/song_tile.dart';
 import '../../player/application/player_providers.dart';
 import '../application/playlist_providers.dart';
@@ -65,12 +66,10 @@ class PlaylistScreen extends ConsumerWidget {
                       const SizedBox(height: 4),
                       Text('${data.songCount} songs', style: const TextStyle(color: AppColors.textSecondary)),
                       const SizedBox(height: 12),
-                      ElevatedButton.icon(
+                      PrimaryPlayButton(
                         onPressed: songs.isEmpty
                             ? null
                             : () => ref.read(playerControllerProvider).playQueue(songs),
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('Play'),
                       ),
                     ],
                   ),

@@ -1,7 +1,9 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/theme/app_theme.dart';
 import '../../../shared/models/song.dart';
 import '../../../shared/widgets/async_value_view.dart';
 import '../../../shared/widgets/media_card.dart';
@@ -28,16 +30,118 @@ class HomeScreen extends ConsumerWidget {
         child: AsyncValueView(
           value: feed,
           onRetry: () => ref.invalidate(homeFeedProvider),
-          data: (data) => ListView(
+          data: (data) {
+            // The hero spotlights whatever the feed considers the strongest
+            // pick for this user: the top of the personalized mix, or the
+            // first item of the first shelf if there is no mix yet.
+            final heroQueue = data.topMix.isNotEmpty
+                ? data.topMix
+                : (data.categories.isNotEmpty ? data.categories.first.items : const <Song>[]);
+
+            return ListView(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                  child: Text(data.greeting, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                ),
+                if (heroQueue.isNotEmpty) _FeaturedHero(song: heroQueue.first, queue: heroQueue),
+                if (data.topMix.isNotEmpty) _SongRail(title: 'Made for you', songs: data.topMix),
+                for (final category in data.categories)
+                  if (category.items.isNotEmpty) _SongRail(title: category.title, songs: category.items),
+                const SizedBox(height: 24),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// A large "Featured" spotlight card at the top of the feed -- a color-block
+/// background with the song's artwork bleeding in from the right edge and
+/// title/artist overlaid, matching the reference design's hero treatment
+/// (as opposed to just another item in a horizontal rail).
+class _FeaturedHero extends ConsumerWidget {
+  const _FeaturedHero({required this.song, required this.queue});
+
+  final Song song;
+  final List<Song> queue;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      child: GestureDetector(
+        onTap: () => ref.read(playerControllerProvider).playQueue(queue, startIndex: 0),
+        child: Container(
+          height: 160,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Stack(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                child: Text(data.greeting, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                width: 150,
+                child: song.thumbnailUrl == null
+                    ? Container(color: Colors.black.withValues(alpha: 0.15))
+                    : CachedNetworkImage(
+                        imageUrl: song.thumbnailUrl!,
+                        fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) => Container(color: Colors.black.withValues(alpha: 0.15)),
+                      ),
               ),
-              if (data.topMix.isNotEmpty) _SongRail(title: 'Made for you', songs: data.topMix),
-              for (final category in data.categories)
-                if (category.items.isNotEmpty) _SongRail(title: category.title, songs: category.items),
-              const SizedBox(height: 24),
+              // Fades the artwork into the color block instead of a hard
+              // edge, so the overlaid text stays legible either way.
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                        AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id).withValues(alpha: 0.0),
+                      ],
+                      stops: const [0.35, 0.85],
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 20,
+                right: 90,
+                bottom: 18,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'FEATURED',
+                      style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.2),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      song.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white, fontSize: 21, fontWeight: FontWeight.w800, height: 1.1),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      song.artistName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
             ],
           ),
         ),

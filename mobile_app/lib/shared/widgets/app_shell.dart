@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/native/headset_safety_channel.dart';
+import '../../core/theme/app_theme.dart';
 import '../../features/player/presentation/mini_player.dart';
 import '../../features/settings/application/settings_providers.dart';
+import 'app_bottom_nav.dart';
 
 /// Bottom-nav shell (Home / Search / Library / Profile) with the persistent
 /// mini-player docked above the nav bar, matching the "mini player above
@@ -46,30 +48,27 @@ class _AppShellState extends ConsumerState<AppShell> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: widget.navigationShell,
-      bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.only(bottom: 4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(bottom: 6),
-                child: MiniPlayer(),
-              ),
-              BottomNavigationBar(
-                currentIndex: widget.navigationShell.currentIndex,
-                onTap: (index) => widget.navigationShell.goBranch(
-                  index,
-                  initialLocation: index == widget.navigationShell.currentIndex,
+      bottomNavigationBar: DecoratedBox(
+        decoration: const BoxDecoration(color: AppColors.background),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 6),
+                  child: MiniPlayer(),
                 ),
-                items: const [
-                  BottomNavigationBarItem(icon: Icon(Icons.home_outlined), activeIcon: Icon(Icons.home), label: 'Home'),
-                  BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
-                  BottomNavigationBarItem(icon: Icon(Icons.library_music_outlined), activeIcon: Icon(Icons.library_music), label: 'Library'),
-                  BottomNavigationBarItem(icon: Icon(Icons.person_outline), activeIcon: Icon(Icons.person), label: 'Profile'),
-                ],
-              ),
-            ],
+                AppBottomNav(
+                  currentIndex: widget.navigationShell.currentIndex,
+                  onTap: (index) => widget.navigationShell.goBranch(
+                    index,
+                    initialLocation: index == widget.navigationShell.currentIndex,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

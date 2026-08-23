@@ -109,10 +109,20 @@ class NowPlayingScreen extends ConsumerWidget {
                   onPressed: player.toggleShuffle,
                 ),
                 IconButton(icon: const Icon(Icons.skip_previous, size: 36), onPressed: player.previous),
-                IconButton.filled(
-                  iconSize: 36,
-                  icon: Icon(player.isPlaying ? Icons.pause : Icons.play_arrow),
-                  onPressed: player.togglePlayPause,
+                // A solid white circle with a black icon, not the theme's
+                // accent-tinted filled button -- the reference design's
+                // transport play control reads as high-contrast chrome
+                // against the artwork, not a branded/colored action.
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                  child: IconButton(
+                    iconSize: 32,
+                    color: Colors.black,
+                    icon: Icon(player.isPlaying ? Icons.pause : Icons.play_arrow),
+                    onPressed: player.togglePlayPause,
+                  ),
                 ),
                 IconButton(icon: const Icon(Icons.skip_next, size: 36), onPressed: player.next),
                 IconButton(

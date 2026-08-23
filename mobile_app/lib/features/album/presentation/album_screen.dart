@@ -6,6 +6,7 @@ import '../../../core/network/api_exception.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/models/album.dart';
 import '../../../shared/widgets/async_value_view.dart';
+import '../../../shared/widgets/primary_play_button.dart';
 import '../../../shared/widgets/song_tile.dart';
 import '../../library/application/library_providers.dart';
 import '../../player/application/player_providers.dart';
@@ -86,14 +87,12 @@ class _AlbumScreenState extends ConsumerState<AlbumScreen> {
                   padding: const EdgeInsets.all(16),
                   child: Row(
                     children: [
-                      ElevatedButton.icon(
+                      PrimaryPlayButton(
                         onPressed: tracks.isEmpty
                             ? null
                             : () => ref.read(playerControllerProvider).playQueue(tracks),
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('Play all'),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 16),
                       IconButton(
                         icon: Icon(saved ? Icons.favorite : Icons.favorite_border),
                         color: saved ? AppColors.accent : null,
