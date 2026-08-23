@@ -53,8 +53,33 @@ lib/
 Google Sign-In auth, onboarding (languages/artists), home feed, search,
 full player (queue/shuffle/repeat/seek) backed by just_audio, artist/album/
 playlist/library screens, lyrics (plain + time-synced), permanent downloads
-with progress tracking synced to `/api/downloads`, and settings (theme,
-audio quality, playback prefs, storage, account).
+with progress tracking synced to `/api/downloads`, settings (theme,
+audio quality, playback prefs, storage, account), and an Android headset
+safety reminder (see below).
+
+### Headset safety reminder (Android only)
+
+`android/app/src/main/kotlin/.../HeadsetSafetyService.kt` is a foreground
+service, independent of the Flutter UI/Activity lifecycle, that tracks
+*continuous* headset/Bluetooth connection time via
+`AudioManager.registerAudioDeviceCallback` and posts a notification after an
+hour connected without a break, repeating every additional hour it stays
+connected. Disconnecting resets the timer entirely. Toggle lives in Settings
+→ Safety, backed by `headset_safety_reminder` in `/api/users/preferences`
+(default on), and `AppShell` syncs the native service to that preference once
+on reaching the home shell.
+
+No iOS equivalent — there's no comparable always-on background capability
+for arbitrary audio-route monitoring on iOS, so `HeadsetSafetyChannel`'s
+calls are no-ops there.
+
+**Not verified on a real device or emulator** — this sandbox has no Android
+tooling with network access to actually build/run the APK (see the `flutter
+build apk` note below). The Kotlin was written carefully against the
+documented `AudioManager`/foreground-service APIs and `flutter analyze`
+passes, but the connect/disconnect callback behavior, the API 29 vs 34
+foreground-service-type handling, and the POST_NOTIFICATIONS permission flow
+all need confirming on a physical device with a real headset before shipping.
 
 ## Known gaps / next steps
 

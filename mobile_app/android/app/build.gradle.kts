@@ -1,11 +1,12 @@
 plugins {
     id("com.android.application")
+    id("com.google.gms.google-services")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
 android {
-    namespace = "com.gaanapy.gaanapy_app"
+    namespace = "com.musichub.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -16,7 +17,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.gaanapy.gaanapy_app"
+        applicationId = "com.musichub.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // firebase_auth / google_sign_in require API 23+.
@@ -47,4 +48,14 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // NotificationCompat/ContextCompat, used by HeadsetSafetyService and
+    // MainActivity's foreground-service bridge.
+    implementation("androidx.core:core-ktx:1.13.1")
+
+    // Firebase – BOM manages all library versions consistently.
+    implementation(platform("com.google.firebase:firebase-bom:34.18.0"))
+    implementation("com.google.firebase:firebase-analytics")
 }

@@ -25,7 +25,8 @@ async def get_preferences(
         "audio_quality": pref.audio_quality,
         "autoplay": pref.autoplay,
         "crossfade": pref.crossfade,
-        "data_saver": pref.data_saver
+        "data_saver": pref.data_saver,
+        "headset_safety_reminder": pref.headset_safety_reminder
     }
     return api_response(data)
 
@@ -46,7 +47,8 @@ async def update_preferences(
         "audio_quality": pref.audio_quality,
         "autoplay": pref.autoplay,
         "crossfade": pref.crossfade,
-        "data_saver": pref.data_saver
+        "data_saver": pref.data_saver,
+        "headset_safety_reminder": pref.headset_safety_reminder
     }
     return api_response(data)
 

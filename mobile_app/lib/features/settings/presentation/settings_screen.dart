@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/native/headset_safety_channel.dart';
 import '../../../core/storage/local_database.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/theme_mode_provider.dart';
@@ -117,6 +118,23 @@ class SettingsScreen extends ConsumerWidget {
                   onChanged: (v) => patch({'crossfade': v.round()}),
                 ),
               ),
+            ),
+            const Divider(),
+            const _SectionTitle('Safety'),
+            SwitchListTile(
+              title: const Text('Headset safety reminder'),
+              subtitle: const Text(
+                'Notify me to take a break after 1 hour of continuous headset use',
+              ),
+              value: data.headsetSafetyReminder,
+              onChanged: (v) async {
+                await patch({'headset_safety_reminder': v});
+                if (v) {
+                  await HeadsetSafetyChannel.start();
+                } else {
+                  await HeadsetSafetyChannel.stop();
+                }
+              },
             ),
             const Divider(),
             const _SectionTitle('Storage'),

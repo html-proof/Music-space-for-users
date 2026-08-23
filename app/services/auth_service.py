@@ -79,7 +79,8 @@ class AuthService:
             audio_quality="very_high",
             autoplay=True,
             crossfade=0,
-            data_saver=False
+            data_saver=False,
+            headset_safety_reminder=True
         )
         db.add(preferences)
 

@@ -14,6 +14,7 @@ class UserPreferencesResponse(BaseModel):
     autoplay: bool = True
     crossfade: int = 0  # 0 to 12 seconds
     data_saver: bool = False
+    headset_safety_reminder: bool = True
 
 
 class UserPreferencesUpdate(BaseModel):
@@ -26,6 +27,7 @@ class UserPreferencesUpdate(BaseModel):
     autoplay: Optional[bool] = None
     crossfade: Optional[int] = Field(None, ge=0, le=12)
     data_saver: Optional[bool] = None
+    headset_safety_reminder: Optional[bool] = None
 
 
 class UserAnalyticsResponse(BaseModel):

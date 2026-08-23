@@ -2,13 +2,24 @@ import asyncio
 import logging
 import time
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.config.settings import redact_url, settings
 from app.db.database import async_session_factory, engine
 from app.models import Base, Language
 
 logger = logging.getLogger("init_db")
+
+# (table, column, DDL type + default). `create_all` only creates missing
+# TABLES, never adds a column to one that already exists -- this project has
+# no Alembic, so a column added to a model after the table was first deployed
+# needs an explicit, idempotent ALTER here. Postgres-only (`ADD COLUMN IF NOT
+# EXISTS` is a Postgres 9.6+ extension); SQLite dev/test databases are created
+# fresh from the current model on every run, so they already have the column
+# and never need this.
+COLUMN_MIGRATIONS = [
+    ("user_preferences", "headset_safety_reminder", "BOOLEAN NOT NULL DEFAULT TRUE"),
+]
 
 # (name, ISO 639-1 code). Seeded once, only if the table is empty -- editable
 # in the database afterwards without a migration or client release.
@@ -60,12 +71,22 @@ async def init_db():
         f"Database tables initialized successfully in "
         f"{time.monotonic() - started:.1f}s."
     )
+    await _apply_column_migrations()
     await _seed_languages()
 
 
 async def _create_all():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def _apply_column_migrations():
+    if engine.dialect.name != "postgresql":
+        return
+    async with engine.begin() as conn:
+        for table, column, ddl in COLUMN_MIGRATIONS:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}"))
+    logger.info(f"Applied {len(COLUMN_MIGRATIONS)} column migration(s).")
 
 
 async def _seed_languages():

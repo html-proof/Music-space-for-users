@@ -150,5 +150,10 @@ class UserPreferences(Base, TimestampMixin):
     autoplay: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     crossfade: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     data_saver: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Reminds the user to take a break after 1 hour of *continuous* headset/
+    # Bluetooth audio-device connection (see app/db/init_db.py's column
+    # migration -- this table predates the column, so create_all alone
+    # won't add it to an already-deployed database).
+    headset_safety_reminder: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     user: Mapped["User"] = relationship("User", back_populates="preferences")

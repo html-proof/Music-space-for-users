@@ -9,6 +9,7 @@ class UserPreferencesData {
   final bool autoplay;
   final int crossfade;
   final bool dataSaver;
+  final bool headsetSafetyReminder;
 
   const UserPreferencesData({
     this.preferredLanguages = const [],
@@ -20,6 +21,7 @@ class UserPreferencesData {
     this.autoplay = true,
     this.crossfade = 0,
     this.dataSaver = false,
+    this.headsetSafetyReminder = true,
   });
 
   factory UserPreferencesData.fromJson(Map<String, dynamic> json) {
@@ -35,6 +37,7 @@ class UserPreferencesData {
       autoplay: json['autoplay'] != false,
       crossfade: (json['crossfade'] as num?)?.toInt() ?? 0,
       dataSaver: json['data_saver'] == true,
+      headsetSafetyReminder: json['headset_safety_reminder'] != false,
     );
   }
 }

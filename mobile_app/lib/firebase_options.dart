@@ -41,6 +41,6 @@ class DefaultFirebaseOptions {
     messagingSenderId: 'REPLACE_ME',
     projectId: 'REPLACE_ME',
     storageBucket: 'REPLACE_ME.appspot.com',
-    iosBundleId: 'com.gaanapy.gaanapyApp',
+    iosBundleId: 'com.musichub.app',
   );
 }
