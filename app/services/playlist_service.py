@@ -60,8 +60,13 @@ class PlaylistService:
         playlist = res.scalar_one_or_none()
         if not playlist:
             return None
-        # Check permissions: if private, must belong to user
-        if not playlist.is_public and playlist.user_id != user_id:
+        # Visible if public, owned by the caller, or collaborative -- that
+        # last case matters because add_song/remove_song/reorder_songs all
+        # fetch through this same method to authorize a non-owner via
+        # `is_collaborative`, and a check here that ignored it would make a
+        # private collaborative playlist invisible (hence unmodifiable) to
+        # every collaborator but the owner, contradicting the flag's purpose.
+        if not playlist.is_public and not playlist.is_collaborative and playlist.user_id != user_id:
             return None
         return playlist
 
@@ -148,13 +153,18 @@ class PlaylistService:
             )
             current_max = (await db.execute(max_stmt)).scalar_one()
             position = 0 if current_max is None else int(current_max) + 1
-
-        entry = PlaylistSong(
-            playlist_id=playlist_id,
-            song_id=song_id,
-            position=position
-        )
-        db.add(entry)
+            entry = PlaylistSong(playlist_id=playlist_id, song_id=song_id, position=position)
+            db.add(entry)
+        else:
+            # An explicit position must shift everything at/after it, the same
+            # way moving an existing entry does -- writing `position` straight
+            # onto a new row (the previous behaviour) could collide with an
+            # entry already at that position, since PlaylistSong has no
+            # uniqueness constraint on (playlist_id, position) to catch it.
+            entry = PlaylistSong(playlist_id=playlist_id, song_id=song_id, position=0)
+            db.add(entry)
+            await db.flush()
+            await PlaylistService._reindex(db, playlist_id, moved=entry, to_position=position)
         await db.commit()
         await db.refresh(entry)
 
