@@ -11,6 +11,18 @@ from app.models.user import User
 logger = logging.getLogger("auth_middleware")
 security = HTTPBearer(auto_error=False)
 
+ALLOWED_SIGN_IN_PROVIDER = "google.com"
+
+
+def _assert_google_provider(payload: dict) -> None:
+    provider = payload.get("firebase", {}).get("sign_in_provider")
+    if provider != ALLOWED_SIGN_IN_PROVIDER:
+        logger.warning(f"Rejected token from disallowed sign-in provider: {provider}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "PROVIDER_NOT_ALLOWED", "message": "Only Google sign-in is supported"}
+        )
+
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
@@ -46,6 +58,8 @@ async def get_current_user(
             detail={"code": "INVALID_TOKEN", "message": "Invalid or expired authentication token"}
         )
 
+    _assert_google_provider(payload)
+
     user = await AuthService.get_user_by_firebase_uid(db, uid)
     if not user:
         # Auto-sync/create user record on first authenticated call
@@ -63,6 +77,7 @@ async def get_optional_user(
         return None
     try:
         payload = verify_firebase_token(credentials.credentials)
+        _assert_google_provider(payload)
         user = await AuthService.get_user_by_firebase_uid(db, payload["uid"])
         if not user:
             user = await AuthService.sync_user(db, payload)

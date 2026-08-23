@@ -64,6 +64,7 @@ def _mock_payload(uid: str) -> Dict[str, Any]:
         "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={uid}",
         "auth_time": 1700000000,
         "exp": 2000000000,
+        "firebase": {"sign_in_provider": "google.com"},
     }
 
 
