@@ -1,17 +1,15 @@
 /// Central place for build-time configuration.
 ///
-/// Override at build/run time with:
-///   flutter run --dart-define=API_BASE_URL=https://your-backend.example.com
-///
-/// Defaults to the Android emulator's loopback alias for a locally running
-/// `uvicorn app.main:app` (10.0.2.2 -> host machine's 127.0.0.1). iOS
-/// simulators and physical devices need an explicit override.
-class AppConfig {
-  AppConfig._();
-
+  // Production traffic goes through the Cloudflare Worker proxy, which
+  // forwards requests to https://music-space-for-users.onrender.com.
+  // Replace the placeholder below with the actual workers.dev URL shown
+  // after running `wrangler deploy` inside cloudflare-worker/.
+  //
+  // Override at build/run time:
+  //   flutter run --dart-define=API_BASE_URL=https://gaanapy-proxy.<account>.workers.dev
   static const String apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://10.0.2.2:8000',
+    defaultValue: 'https://gaanapy-proxy.imeseban.workers.dev',
   );
 
   static const String appName = 'GaanaPy';

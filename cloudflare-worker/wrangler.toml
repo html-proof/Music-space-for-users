@@ -1,0 +1,18 @@
+name = "gaanapy-proxy"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment variables
+#   Set BACKEND_URL here OR override it per-environment below.
+#   You can also set it in the Cloudflare dashboard under Workers > Settings >
+#   Variables without touching this file (recommended for secrets).
+# ──────────────────────────────────────────────────────────────────────────────
+[vars]
+BACKEND_URL = "https://music-space-for-users.onrender.com"
+
+# ── Staging environment (optional) ───────────────────────────────────────────
+# [env.staging]
+# name = "gaanapy-proxy-staging"
+# [env.staging.vars]
+# BACKEND_URL = "https://music-space-for-users-staging.onrender.com"
