@@ -6,3 +6,8 @@
 .env
 firebase-credentials.json
 *credentials*.json
+
+# Local secret bundles used to populate the Render Dashboard. Never commit.
+render_upload.env
+*.env
+!.env.example

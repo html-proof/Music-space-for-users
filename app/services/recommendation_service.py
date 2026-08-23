@@ -11,6 +11,7 @@ from app.models.recommendation import UserBehaviorProfile, RecommendationSignal
 from app.schemas.recommendation import RecommendationCategoryResponse, HomeRecommendationsResponse
 from app.services.cache_service import cache_service
 from app.services.catalog_service import catalog_service
+from app.utils.cache_keys import home_recommendations_key
 from app.config.settings import settings
 
 logger = logging.getLogger("recommendation_service")
@@ -77,14 +78,32 @@ class RecommendationService:
         }
 
     @staticmethod
+    def _greeting(user_name: str) -> str:
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            return f"Good morning, {user_name}"
+        if 12 <= hour < 17:
+            return f"Good afternoon, {user_name}"
+        return f"Good evening, {user_name}"
+
+    @staticmethod
     async def get_home_recommendations(
         db: AsyncSession,
         user_id: str,
         user_name: str = "Friend"
     ) -> HomeRecommendationsResponse:
-        cache_key = f"recommendations:user:{user_id}"
+        cache_key = home_recommendations_key(user_id)
         cached = await cache_service.get_json(cache_key)
-        # If cache exists and is valid, return directly (or construct from models)
+        if cached:
+            try:
+                response = HomeRecommendationsResponse.model_validate(cached)
+                # The greeting depends on the current hour and the caller's name,
+                # so it is recomputed rather than served from the cache.
+                response.greeting = RecommendationService._greeting(user_name)
+                return response
+            except Exception as e:
+                logger.warning(f"Discarding unusable cached recommendations for {user_id}: {e}")
+                await cache_service.delete(cache_key)
 
         affinities = await RecommendationService.calculate_user_affinities(db, user_id)
         categories: List[RecommendationCategoryResponse] = []
@@ -144,7 +163,7 @@ class RecommendationService:
                 ))
 
         # 4. Your Daily Mix
-        daily_stmt = select(Song).order_by(func.random() if db.bind.dialect.name == "sqlite" else func.random()).limit(10)
+        daily_stmt = select(Song).order_by(func.random()).limit(10)
         try:
             daily_res = await db.execute(daily_stmt)
             daily_songs = list(daily_res.scalars().all())
@@ -183,19 +202,27 @@ class RecommendationService:
             ))
 
         # Greeting logic based on hour
-        hour = datetime.now().hour
-        if 5 <= hour < 12:
-            greeting = f"Good morning, {user_name}"
-        elif 12 <= hour < 17:
-            greeting = f"Good afternoon, {user_name}"
-        else:
-            greeting = f"Good evening, {user_name}"
-
-        return HomeRecommendationsResponse(
-            greeting=greeting,
+        response = HomeRecommendationsResponse(
+            greeting=RecommendationService._greeting(user_name),
             categories=categories,
             top_mix=made_for_you_songs[:6]
         )
+
+        try:
+            await cache_service.set_json(
+                cache_key,
+                response.model_dump(mode="json"),
+                ttl_seconds=settings.RECOMMENDATION_CACHE_TTL_SECONDS
+            )
+        except Exception as e:
+            logger.warning(f"Failed to cache recommendations for {user_id}: {e}")
+
+        return response
+
+    @staticmethod
+    async def invalidate_home_recommendations(user_id: str) -> None:
+        """Drop the cached home feed after a signal that would change it."""
+        await cache_service.delete(home_recommendations_key(user_id))
 
     @staticmethod
     async def get_similar_songs(db: AsyncSession, song_id: str, limit: int = 10) -> List[Song]:

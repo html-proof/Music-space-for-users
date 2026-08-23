@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.gaanapy import GaanaPy
+from app.db.base import is_uuid
 from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
 
@@ -158,7 +159,14 @@ class CatalogService:
         return songs
 
     async def get_song_by_id(self, db: AsyncSession, song_id: str) -> Optional[Song]:
-        stmt = select(Song).where(or_(Song.id == song_id, Song.external_id == song_id))
+        # song_id is either one of our own UUIDs or a Gaana seokey such as
+        # "simtaangaran". Song.id is a native uuid on PostgreSQL, so only
+        # compare against it when the value actually parses -- otherwise the
+        # bind raises and an unknown song 500s instead of 404ing.
+        conditions = [Song.external_id == song_id]
+        if is_uuid(song_id):
+            conditions.append(Song.id == song_id)
+        stmt = select(Song).where(or_(*conditions))
         res = await db.execute(stmt)
         song = res.scalar_one_or_none()
         if song:

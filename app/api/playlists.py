@@ -180,3 +180,5 @@ async def reorder_songs(
         return api_response({"message": "Playlist reordered successfully"})
     except PermissionError as e:
         return api_error("FORBIDDEN", str(e), status_code=403)
+    except KeyError as e:
+        return api_error("SONG_NOT_IN_PLAYLIST", str(e).strip("'\""), status_code=400)

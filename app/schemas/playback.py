@@ -1,8 +1,18 @@
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from app.schemas.song import SongResponse
 from app.schemas.device import DeviceResponse
+
+PLAYBACK_STATES = ("playing", "paused", "stopped", "buffering")
+REPEAT_MODES = ("off", "all", "one")
+PLAYBACK_EVENTS = (
+    "PLAY", "PAUSE", "RESUME", "SEEK", "SKIP", "NEXT", "PREVIOUS",
+    "STOP", "BUFFER_START", "BUFFER_END", "COMPLETE",
+)
+
+_STATE_PATTERN = f"^({'|'.join(PLAYBACK_STATES)})$"
+_REPEAT_PATTERN = f"^({'|'.join(REPEAT_MODES)})$"
 
 
 class PlayRequest(BaseModel):
@@ -39,7 +49,7 @@ class ShuffleRequest(BaseModel):
 
 
 class RepeatRequest(BaseModel):
-    repeat_mode: str = Field(..., pattern="^(off|all|one)$")
+    repeat_mode: str = Field(..., pattern=_REPEAT_PATTERN)
     device_id: Optional[str] = None
 
 
@@ -47,24 +57,50 @@ class SyncPlaybackRequest(BaseModel):
     device_id: str
     song_id: Optional[str] = None
     playlist_id: Optional[str] = None
-    position_seconds: float = 0.0
-    duration_seconds: float = 0.0
-    state: str = Field("playing", pattern="^(playing|paused|stopped|buffering)$")
-    volume: int = 100
+    position_seconds: float = Field(0.0, ge=0.0)
+    duration_seconds: float = Field(0.0, ge=0.0)
+    state: str = Field("playing", pattern=_STATE_PATTERN)
+    volume: int = Field(100, ge=0, le=100)
     shuffle: bool = False
-    repeat_mode: str = "off"
+    repeat_mode: str = Field("off", pattern=_REPEAT_PATTERN)
     queue: Optional[List[str]] = None
 
 
 class PlaybackEventRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     device_id: str
     song_id: str
-    event: str = Field(..., description="play, pause, resume, seek, skip, next, previous, stop, buffer_start, buffer_end, complete")
-    position: float = Field(0.0, description="Playback position in seconds")
-    duration: float = Field(0.0, description="Total song duration in seconds")
+    # `event_type` is accepted as an alias so callers using the same wording as
+    # the stored PlaybackEvent column keep working.
+    event: str = Field(
+        ...,
+        validation_alias=AliasChoices("event", "event_type"),
+        description=", ".join(PLAYBACK_EVENTS),
+    )
+    position: float = Field(
+        0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("position", "position_seconds"),
+        description="Playback position in seconds",
+    )
+    duration: float = Field(
+        0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("duration", "duration_seconds"),
+        description="Total song duration in seconds",
+    )
     session_id: Optional[str] = None
     timestamp: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("event")
+    @classmethod
+    def known_event(cls, v: str) -> str:
+        normalized = (v or "").strip().upper()
+        if normalized not in PLAYBACK_EVENTS:
+            raise ValueError(f"event must be one of: {', '.join(PLAYBACK_EVENTS)}")
+        return normalized
 
 
 class PlaybackStateResponse(BaseModel):

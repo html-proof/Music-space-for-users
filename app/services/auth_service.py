@@ -96,12 +96,13 @@ class AuthService:
         )
         db.add(playback)
 
-        # Create initial behavior profile
+        # Create initial behavior profile. These lists are surfaced verbatim by
+        # UserAnalyticsResponse, whose entries are {"name": ..., "count": ...}.
         behavior_profile = UserBehaviorProfile(
             user_id=user.id,
             top_artists=[],
             top_genres=[],
-            top_languages=[language],
+            top_languages=[{"name": language, "count": 0}],
             top_moods=[],
             average_session_minutes=0.0,
             completion_rate=0.0,

@@ -28,7 +28,13 @@ def api_response(data: Any = None, status_code: int = 200) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=payload)
 
 
-def api_error(code: str, message: str, status_code: int = 400, details: Any = None) -> JSONResponse:
+def api_error(
+    code: str,
+    message: str,
+    status_code: int = 400,
+    details: Any = None,
+    headers: Optional[Dict[str, str]] = None
+) -> JSONResponse:
     """Returns a standardized error API response."""
     payload = {
         "success": False,
@@ -40,4 +46,4 @@ def api_error(code: str, message: str, status_code: int = 400, details: Any = No
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    return JSONResponse(status_code=status_code, content=payload)
+    return JSONResponse(status_code=status_code, content=payload, headers=headers)

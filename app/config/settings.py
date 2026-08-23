@@ -1,7 +1,10 @@
 import os
 from typing import List, Optional, Union
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Environments that must never accept mock authentication tokens.
+PRODUCTION_ENVS = {"production", "prod", "staging", "stage"}
 
 
 class Settings(BaseSettings):
@@ -62,7 +65,9 @@ class Settings(BaseSettings):
     FIREBASE_CLIENT_EMAIL: Optional[str] = None
     FIREBASE_PRIVATE_KEY: Optional[str] = None
     FIREBASE_CREDENTIALS_PATH: Optional[str] = None
-    FIREBASE_EMULATOR_ENABLED: bool = True
+    # Accepts mock "test_token_<uid>" bearer tokens. Local development only:
+    # enabling this in a production environment is refused at startup.
+    FIREBASE_EMULATOR_ENABLED: bool = False
 
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
@@ -76,6 +81,27 @@ class Settings(BaseSettings):
             return v
         return ["*"]
 
+    def is_production(self) -> bool:
+        return self.APP_ENV.strip().lower() in PRODUCTION_ENVS
+
+    def cors_allows_wildcard(self) -> bool:
+        return "*" in (self.CORS_ORIGINS or [])
+
+    @model_validator(mode="after")
+    def refuse_mock_auth_in_production(self) -> "Settings":
+        """
+        Fail closed: a production deployment that also accepts mock tokens has no
+        authentication at all, so refuse to boot rather than serve every account
+        to anyone who can guess a uid.
+        """
+        if self.FIREBASE_EMULATOR_ENABLED and self.is_production():
+            raise ValueError(
+                f"FIREBASE_EMULATOR_ENABLED must be False when APP_ENV={self.APP_ENV!r}. "
+                "Mock authentication tokens are accepted while it is on, which would "
+                "allow anyone to impersonate any user."
+            )
+        return self
+
     # Recommendation Rules
     MIN_LISTEN_SECONDS: int = 30
     MIN_COMPLETION_PERCENTAGE: int = 50
@@ -83,6 +109,9 @@ class Settings(BaseSettings):
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 120
+    # Set to True when running behind a reverse proxy (Render, nginx, Cloudflare)
+    # so rate limiting keys off the real client IP instead of the proxy's.
+    TRUST_PROXY_HEADERS: bool = False
 
 
 settings = Settings()

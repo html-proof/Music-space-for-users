@@ -40,6 +40,33 @@ class UserService:
         return pref
 
     @staticmethod
+    def _as_counted_list(raw: Optional[List[Any]]) -> List[dict]:
+        """
+        Normalize a stored behaviour-profile list to [{"name", "count"}, ...].
+
+        Profiles have been written both as bare strings and as dicts, so rows
+        already in the database can be either shape; returning a bare string
+        here fails UserAnalyticsResponse validation and 500s the endpoint.
+        """
+        normalized: List[dict] = []
+        for item in raw or []:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("value") or item.get("id")
+                if name is None:
+                    continue
+                count = item.get("count", item.get("score", 0))
+                try:
+                    count = int(count)
+                except (TypeError, ValueError):
+                    count = 0
+                normalized.append({"name": str(name), "count": count})
+            elif isinstance(item, str):
+                normalized.append({"name": item, "count": 0})
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                normalized.append({"name": str(item[0]), "count": int(item[1] or 0)})
+        return normalized
+
+    @staticmethod
     async def get_analytics(db: AsyncSession, user_id: str) -> UserAnalyticsResponse:
         # Check if cached behavior profile exists
         profile_stmt = select(UserBehaviorProfile).where(UserBehaviorProfile.user_id == user_id)
@@ -60,10 +87,10 @@ class UserService:
         total_plays = len(records)
         if total_plays == 0 and profile:
             return UserAnalyticsResponse(
-                top_artists=profile.top_artists or [],
-                top_genres=profile.top_genres or [],
-                top_languages=profile.top_languages or [],
-                top_moods=profile.top_moods or [],
+                top_artists=UserService._as_counted_list(profile.top_artists),
+                top_genres=UserService._as_counted_list(profile.top_genres),
+                top_languages=UserService._as_counted_list(profile.top_languages),
+                top_moods=UserService._as_counted_list(profile.top_moods),
                 average_session_minutes=profile.average_session_minutes or 0.0,
                 completion_rate=profile.completion_rate or 0.0,
                 skip_rate=profile.skip_rate or 0.0

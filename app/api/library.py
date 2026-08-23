@@ -103,7 +103,8 @@ async def save_album(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    await LibraryService.save_album(db, current_user.id, album_id)
+    if not await LibraryService.save_album(db, current_user.id, album_id):
+        return api_error("ALBUM_NOT_FOUND", f"Album {album_id} not found", status_code=404)
     return api_response({"message": "Album saved to library", "album_id": album_id, "is_saved": True})
 
 
@@ -135,7 +136,8 @@ async def follow_artist(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    await LibraryService.follow_artist(db, current_user.id, artist_id)
+    if not await LibraryService.follow_artist(db, current_user.id, artist_id):
+        return api_error("ARTIST_NOT_FOUND", f"Artist {artist_id} not found", status_code=404)
     return api_response({"message": "Artist followed", "artist_id": artist_id, "is_followed": True})
 
 

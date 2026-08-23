@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, Request, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
@@ -69,11 +70,14 @@ async def register_device(
 @router.post("/{device_id}/heartbeat", summary="Send device heartbeat to keep online status")
 async def heartbeat(
     device_id: str,
-    req: DeviceHeartbeatRequest,
     request: Request,
+    req: Optional[DeviceHeartbeatRequest] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    # The body is optional: a bare ping is the documented usage, and all its
+    # fields already have defaults.
+    req = req or DeviceHeartbeatRequest()
     if not req.ip_address and request.client:
         req.ip_address = request.client.host
     device = await DeviceService.heartbeat(db, current_user.id, device_id, req)

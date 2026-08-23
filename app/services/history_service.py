@@ -5,6 +5,8 @@ from sqlalchemy import select, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.history import ListeningHistory, SearchHistory
 from app.models.song import Song
+from app.services.cache_service import cache_service
+from app.utils.cache_keys import home_recommendations_key
 from app.config.settings import settings
 
 logger = logging.getLogger("history_service")
@@ -45,6 +47,9 @@ class HistoryService:
         db.add(entry)
         await db.commit()
         await db.refresh(entry)
+
+        # A new listen changes the affinities the home feed is built from.
+        await cache_service.delete(home_recommendations_key(user_id))
         return entry
 
     @staticmethod

@@ -39,62 +39,81 @@ def init_firebase() -> bool:
             return True
 
         if settings.FIREBASE_EMULATOR_ENABLED:
-            logger.warning("Firebase Admin running in emulator/dev mode without live GCP credentials.")
+            logger.warning(
+                "Firebase Admin running in DEV MOCK mode without live GCP credentials. "
+                "Only 'test_token_<uid>' and 'mock_<base64>' tokens are accepted."
+            )
             _firebase_initialized = False
             return True
 
-        logger.warning("Firebase credentials not supplied and emulator is disabled.")
+        logger.critical(
+            "Firebase credentials not supplied and emulator mode is disabled -- "
+            "every authenticated request will be rejected with 401."
+        )
         return False
     except Exception as e:
         logger.error(f"Error initializing Firebase Admin: {e}")
         return False
 
 
+def _mock_payload(uid: str) -> Dict[str, Any]:
+    return {
+        "uid": uid,
+        "email": f"{uid}@example.com",
+        "name": f"User {uid}",
+        "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={uid}",
+        "auth_time": 1700000000,
+        "exp": 2000000000,
+    }
+
+
+def _dev_mock_enabled() -> bool:
+    """
+    Mock tokens are only ever honoured when the emulator is explicitly enabled
+    AND the environment is not a production one. Settings refuses that
+    combination at startup, so this is a second, independent guard.
+    """
+    return settings.FIREBASE_EMULATOR_ENABLED and not settings.is_production()
+
+
 def verify_firebase_token(token: str) -> Dict[str, Any]:
     """
-    Verifies a Firebase ID token.
-    In dev/emulator mode, accepts mock test tokens.
+    Verifies a Firebase ID token and returns its decoded claims.
+
+    Raises ValueError for any token that cannot be cryptographically verified.
+    In local development with FIREBASE_EMULATOR_ENABLED=True, two explicitly
+    prefixed mock formats are accepted -- "test_token_<uid>" and
+    "mock_<base64-json>". No other token is ever trusted without verification.
     """
-    if settings.FIREBASE_EMULATOR_ENABLED and token.startswith("test_token_"):
-        uid = token.replace("test_token_", "")
-        return {
-            "uid": uid,
-            "email": f"{uid}@example.com",
-            "name": f"User {uid}",
-            "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={uid}",
-            "auth_time": 1700000000,
-            "exp": 2000000000,
-        }
+    if not token or not token.strip():
+        raise ValueError("Authentication token is empty.")
 
-    if _firebase_initialized:
-        try:
-            decoded = auth.verify_id_token(token)
-            return decoded
-        except Exception as e:
-            if not settings.FIREBASE_EMULATOR_ENABLED:
-                logger.warning(f"Firebase token verification failed: {e}")
-                raise ValueError(f"Invalid Firebase ID token: {str(e)}")
+    if _dev_mock_enabled():
+        if token.startswith("test_token_"):
+            uid = token[len("test_token_"):]
+            if not uid:
+                raise ValueError("Mock token is missing a uid.")
+            return _mock_payload(uid)
 
-    if settings.FIREBASE_EMULATOR_ENABLED:
-        try:
-            # Check if it's a test json or base64 token
-            if token.startswith("mock_"):
-                data = json.loads(base64.b64decode(token[5:]).decode())
-                return data
-        except Exception:
-            pass
+        if token.startswith("mock_"):
+            try:
+                payload = json.loads(base64.b64decode(token[5:]).decode())
+            except Exception as e:
+                raise ValueError(f"Malformed mock token: {e}")
+            if not isinstance(payload, dict) or not payload.get("uid"):
+                raise ValueError("Mock token payload must contain a uid.")
+            return payload
 
-        # Default dev user fallback
-        return {
-            "uid": token if len(token) < 128 else token[:32],
-            "email": "developer@musicapp.local",
-            "name": "Dev User",
-            "picture": "https://api.dicebear.com/7.x/avataaars/svg?seed=developer",
-            "auth_time": 1700000000,
-            "exp": 2000000000,
-        }
+    if not _firebase_initialized:
+        # No verifier available. Previously this fell through to trusting the
+        # raw token as a uid; that is an authentication bypass, so refuse.
+        raise ValueError("Firebase Authentication is not configured.")
 
-    raise ValueError("Firebase Authentication is not configured.")
+    try:
+        return auth.verify_id_token(token)
+    except Exception as e:
+        logger.warning(f"Firebase token verification failed: {e}")
+        raise ValueError(f"Invalid Firebase ID token: {e}")
 
 
 def delete_firebase_user(uid: str) -> bool:

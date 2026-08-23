@@ -16,20 +16,33 @@ services:
         value: production
       - key: DEBUG
         value: "False"
+      # Secrets are never committed. `sync: false` tells Render to prompt for the
+      # value in the Dashboard instead of reading it from this file.
       - key: DATABASE_URL
-        value: postgresql+asyncpg://postgres:xkF4otL3JuFpCSxg@db.snpvgzitwbdjiioaqozc.supabase.co:5432/postgres
+        sync: false # postgresql+asyncpg://... Supabase connection string
       - key: FIREBASE_PROJECT_ID
         value: personal-songs
       - key: FIREBASE_CLIENT_EMAIL
         value: firebase-adminsdk-fbsvc@personal-songs.iam.gserviceaccount.com
       - key: FIREBASE_PRIVATE_KEY
         sync: false # Paste the Firebase private key in Render Dashboard
+      # Must stay False in production: the app refuses to boot otherwise, because
+      # the emulator path accepts unverified mock bearer tokens.
       - key: FIREBASE_EMULATOR_ENABLED
         value: "False"
       - key: REDIS_ENABLED
         value: "True"
       - key: REDIS_URL
-        value: rediss://default:gQAAAAAAAUq9AAIgcDIzMTNjMDhkNjgwODg0Y2MxOWIxZjBhYTQwODEyZTJmNw@model-dog-84669.upstash.io:6379
+        sync: false # rediss://... Upstash connection string
+      # Explicit origin list. Leaving this as "*" disables credentialed
+      # cross-origin requests, since reflecting any origin with credentials
+      # would let any site read authenticated responses.
+      - key: CORS_ORIGINS
+        sync: false # e.g. https://app.example.com,https://www.example.com
+      # Render terminates TLS at its edge proxy, so X-Forwarded-For is the only
+      # source of the real client IP for rate limiting.
+      - key: TRUST_PROXY_HEADERS
+        value: "True"
       - key: MIN_LISTEN_SECONDS
         value: "30"
       - key: MIN_COMPLETION_PERCENTAGE

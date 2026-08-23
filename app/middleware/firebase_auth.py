@@ -30,13 +30,23 @@ async def get_current_user(
     try:
         payload = verify_firebase_token(token)
     except Exception as e:
+        # Logged with the reason; the response stays generic so verifier
+        # internals are not disclosed to the caller.
         logger.warning(f"Unauthorized token verification failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "INVALID_TOKEN", "message": f"Invalid or expired authentication token: {str(e)}"}
+            detail={"code": "INVALID_TOKEN", "message": "Invalid or expired authentication token"}
         )
 
-    user = await AuthService.get_user_by_firebase_uid(db, payload["uid"])
+    uid = payload.get("uid")
+    if not uid:
+        logger.warning("Verified token contained no uid claim.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "INVALID_TOKEN", "message": "Invalid or expired authentication token"}
+        )
+
+    user = await AuthService.get_user_by_firebase_uid(db, uid)
     if not user:
         # Auto-sync/create user record on first authenticated call
         user = await AuthService.sync_user(db, payload)

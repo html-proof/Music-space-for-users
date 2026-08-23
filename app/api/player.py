@@ -5,6 +5,7 @@ from app.middleware.firebase_auth import get_current_user
 from app.models.user import User
 from app.schemas.playback import PlayRequest, PauseRequest, ResumeRequest, SeekRequest, SyncPlaybackRequest, PlaybackEventRequest
 from app.services.playback_service import PlaybackService
+from app.services.catalog_service import catalog_service
 from app.utils.response import api_response, api_error
 
 router = APIRouter(prefix="/api/player", tags=["Player & Playback"])
@@ -144,11 +145,17 @@ async def ingest_event(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    # Verify the song first: inserting an unknown song_id violates the foreign
+    # key and surfaced as a 500 rather than a client error.
+    song = await catalog_service.get_song_by_id(db, req.song_id)
+    if not song:
+        return api_error("SONG_NOT_FOUND", f"Song {req.song_id} not found", status_code=404)
+
     event = await PlaybackService.record_event(
         db=db,
         user_id=current_user.id,
         device_id=req.device_id,
-        song_id=req.song_id,
+        song_id=song.id,
         event_type=req.event,
         position_seconds=req.position,
         duration_seconds=req.duration,

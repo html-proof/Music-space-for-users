@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional, List, TYPE_CHECKING
-from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, Index, func
+from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, Index, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, GUID, TimestampMixin
 
@@ -72,6 +72,7 @@ class PlaylistSong(Base):
 
     __table_args__ = (
         Index("ix_playlist_position", "playlist_id", "position"),
+        UniqueConstraint("playlist_id", "song_id", name="uq_playlist_song"),
     )
 
     playlist: Mapped["Playlist"] = relationship("Playlist", back_populates="songs")

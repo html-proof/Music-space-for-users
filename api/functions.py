@@ -1,12 +1,15 @@
 import binascii
+import logging
 from Crypto.Cipher import AES
 import base64
 
+logger = logging.getLogger("gaana.functions")
+
 class Functions:
-    
+
     def __init__(self):
         self.BLOCK_SIZE = 16
-    
+
     async def decryptLink(self, encrypted_data: str) -> str:
         try:
             encrypted_data = encrypted_data.strip()
@@ -42,7 +45,14 @@ class Functions:
             TypeError,
             UnicodeDecodeError,
             binascii.Error,
-        ):
+        ) as e:
+            ## Callers treat "" as "no stream available". Log it so a rotated
+            ## master key shows up as a warning instead of silently empty URLs.
+            logger.warning(
+                "Stream link decryption failed (%s: %s). "
+                "The Gaana master key may have rotated.",
+                type(e).__name__, e
+            )
             return ""
 
     async def findArtistNames(self, results: list) -> str:

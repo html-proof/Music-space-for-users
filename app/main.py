@@ -11,7 +11,8 @@ from app.db.init_db import init_db
 from app.services.cache_service import cache_service
 from app.services.catalog_service import catalog_service
 from app.websocket.player_socket import ws_router
-from app.middleware.rate_limit import rate_limiter
+from app.websocket.pubsub import player_pubsub
+from app.middleware.rate_limit import RateLimitMiddleware
 from app.utils.response import api_response, api_error
 
 from app.api import (
@@ -38,12 +39,19 @@ logger = logging.getLogger("main")
 async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME} in {settings.APP_ENV} mode...")
+    if settings.FIREBASE_EMULATOR_ENABLED:
+        logger.warning(
+            "FIREBASE_EMULATOR_ENABLED is on: mock 'test_token_<uid>' bearer tokens "
+            "are accepted. Never enable this outside local development."
+        )
     init_firebase()
     await init_db()
     await cache_service.initialize()
+    await player_pubsub.start()
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
+    await player_pubsub.stop()
     await cache_service.close()
     await catalog_service.close()
 
@@ -52,14 +60,31 @@ app = FastAPI(
     title="Spotify-like Music App API",
     description="Production-ready FastAPI backend with Firebase Auth, Supabase PostgreSQL, Redis, WebSockets, and Gaana music streaming catalog.",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-# CORS
+# Rate limiting. The limiter module existed but was never wired in, leaving the
+# API with no limit at all. Added before CORS so that CORSMiddleware ends up
+# outermost and a 429 still carries the headers a browser needs to read it.
+app.add_middleware(RateLimitMiddleware)
+
+# CORS. Reflecting an arbitrary origin while also allowing credentials lets any
+# site read authenticated responses, so the wildcard and credentials are never
+# combined: an explicit origin list is required to allow credentials.
+_cors_allow_credentials = not settings.cors_allows_wildcard()
+if not _cors_allow_credentials:
+    logger.warning(
+        "CORS_ORIGINS contains '*', so credentialed cross-origin requests are "
+        "disabled. Set CORS_ORIGINS to an explicit comma-separated list of "
+        "origins to allow cookies and Authorization headers from the browser."
+    )
+if settings.is_production() and settings.cors_allows_wildcard():
+    logger.critical("Production deployment is serving CORS_ORIGINS='*'. Set an explicit origin list.")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -77,17 +102,25 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         message = str(exc.detail)
         details = None
 
-    return api_error(code=code, message=message, status_code=exc.status_code, details=details)
+    return api_error(
+        code=code,
+        message=message,
+        status_code=exc.status_code,
+        details=details,
+        headers=getattr(exc, "headers", None)
+    )
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception(f"Unhandled exception: {exc}")
+    # The exception type and message are internal detail; they are logged above
+    # and only echoed to the client when DEBUG is on.
     return api_error(
         code="INTERNAL_SERVER_ERROR",
-        message=f"An unexpected error occurred: {type(exc).__name__}",
+        message="An unexpected error occurred.",
         status_code=500,
-        details=str(exc) if settings.DEBUG else None
+        details={"type": type(exc).__name__, "error": str(exc)} if settings.DEBUG else None
     )
 
 
