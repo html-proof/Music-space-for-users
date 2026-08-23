@@ -83,11 +83,23 @@ class CatalogService:
             image_url=raw_song.get("artist_image")
         )
 
+        album_seokey = raw_song.get("album_seokey")
+        album_ext_id = raw_song.get("album_id") or album_seokey
+        if not album_ext_id:
+            # No real album identifier from Gaana (common for singles), and
+            # get_or_create_album falls back to matching by title when there
+            # is none -- every such track shares the literal title "Single",
+            # which would otherwise merge unrelated singles from every artist
+            # into one shared "Single" album. Keying off this song's own
+            # seokey instead keeps each single its own album, one row per
+            # song rather than one row for the whole catalog.
+            album_ext_id = f"single-{seokey}"
+
         album = await self.get_or_create_album(
             db,
             title=album_name,
-            seokey=raw_song.get("album_seokey"),
-            external_id=raw_song.get("album_id"),
+            seokey=album_seokey,
+            external_id=album_ext_id,
             cover_url=thumbnail_url,
             artist_id=artist.id,
             artist_name=artist.name
