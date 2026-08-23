@@ -24,7 +24,9 @@ async def get_languages(
     db: AsyncSession = Depends(get_db),
 ):
     languages = await onboarding_service.get_languages(db)
-    return api_response([{"id": lang.id, "name": lang.name, "code": lang.code} for lang in languages])
+    # No numeric id or ISO code: these are catalog-derived strings, not rows
+    # from a maintained reference table -- the name doubles as its own id.
+    return api_response([{"id": name, "name": name, "code": ""} for name in languages])
 
 
 @router.get("/artists/suggestions", summary="Suggested artists for onboarding artist selection")

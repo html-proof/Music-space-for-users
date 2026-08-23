@@ -1,7 +1,6 @@
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.language import Language
 from app.models.song import Artist, Song
 
 
@@ -39,10 +38,13 @@ async def seed_artists_with_language_songs(db: AsyncSession):
 
 
 async def seed_languages(db: AsyncSession):
+    """Languages are derived from the songs catalog, not a seeded table --
+    this stands in for songs having actually been ingested in those
+    languages."""
     db.add_all([
-        Language(name="English", code="en"),
-        Language(name="Malayalam", code="ml"),
-        Language(name="Tamil", code="ta"),
+        Song(external_id="lang-seed-en", title="Seed Song EN", language="English", duration=180),
+        Song(external_id="lang-seed-ml", title="Seed Song ML", language="Malayalam", duration=180),
+        Song(external_id="lang-seed-ta", title="Seed Song TA", language="Tamil", duration=180),
     ])
     await db.commit()
 
@@ -60,8 +62,9 @@ async def test_status_defaults_to_incomplete(client: AsyncClient, auth_headers: 
     data = res.json()["data"]
     assert data["completed"] is False
     assert data["completed_at"] is None
-    # sync_user seeds preferred_languages with a default, not an empty list
-    assert isinstance(data["preferred_languages"], list)
+    # sync_user starts a new user with no preferred languages at all -- it is
+    # never allowed to guess one on the user's behalf.
+    assert data["preferred_languages"] == []
     assert data["favorite_artists"] == []
 
 

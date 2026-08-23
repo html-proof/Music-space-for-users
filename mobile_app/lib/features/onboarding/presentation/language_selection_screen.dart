@@ -18,11 +18,16 @@ class _LanguageSelectionScreenState extends ConsumerState<LanguageSelectionScree
   bool _saving = false;
 
   Future<void> _continue() async {
-    if (_selected.isEmpty) return;
     setState(() => _saving = true);
     try {
-      await ref.read(onboardingRepositoryProvider).setLanguages(_selected.toList());
-      ref.invalidate(onboardingStatusProvider);
+      // Nothing selected -- either the catalog has no languages yet (a
+      // freshly deployed/thin backend) or the user chose not to pick one.
+      // Either way there is nothing valid to save, so this just moves on
+      // rather than blocking onboarding on data the backend doesn't have.
+      if (_selected.isNotEmpty) {
+        await ref.read(onboardingRepositoryProvider).setLanguages(_selected.toList());
+        ref.invalidate(onboardingStatusProvider);
+      }
       if (!mounted) return;
       context.go('/onboarding/artists');
     } finally {
@@ -43,12 +48,34 @@ class _LanguageSelectionScreenState extends ConsumerState<LanguageSelectionScree
               value: languages,
               onRetry: () => ref.invalidate(onboardingLanguagesProvider),
               data: (options) {
+                // A genuinely empty catalog is expected on a fresh/thin
+                // backend -- languages are derived from songs actually
+                // ingested, not a maintained list, so there is nothing fake
+                // to show here instead.
+                if (options.isEmpty) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.language, color: AppColors.textSecondary, size: 40),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'No languages available yet -- the music catalog is still filling up. You can continue and pick one later.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: AppColors.textSecondary),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
                 // No client-side default selection -- the backend's language
                 // list carries no notion of a "preferred" entry, so picking
                 // one for the user (even just to pre-check a box) would be
                 // exactly the kind of preset content this screen exists to
-                // avoid. The user chooses; Continue stays disabled until they
-                // do.
+                // avoid. The user chooses.
                 return ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   itemCount: options.length,
@@ -81,11 +108,11 @@ class _LanguageSelectionScreenState extends ConsumerState<LanguageSelectionScree
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: _selected.isEmpty || _saving ? null : _continue,
+                  onPressed: _saving ? null : _continue,
                   child: _saving
                       ? const SizedBox(
                           width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : const Text('Continue'),
+                      : Text(_selected.isEmpty ? 'Skip for now' : 'Continue'),
                 ),
               ),
             ),

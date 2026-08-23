@@ -2,11 +2,11 @@ import asyncio
 import logging
 import time
 
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 
 from app.config.settings import redact_url, settings
-from app.db.database import async_session_factory, engine
-from app.models import Base, Language
+from app.db.database import engine
+from app.models import Base
 
 logger = logging.getLogger("init_db")
 
@@ -19,26 +19,6 @@ logger = logging.getLogger("init_db")
 # and never need this.
 COLUMN_MIGRATIONS = [
     ("user_preferences", "headset_safety_reminder", "BOOLEAN NOT NULL DEFAULT TRUE"),
-]
-
-# (name, ISO 639-1 code). Seeded once, only if the table is empty -- editable
-# in the database afterwards without a migration or client release.
-DEFAULT_LANGUAGES = [
-    ("English", "en"),
-    ("Hindi", "hi"),
-    ("Malayalam", "ml"),
-    ("Tamil", "ta"),
-    ("Telugu", "te"),
-    ("Kannada", "kn"),
-    ("Punjabi", "pa"),
-    ("Bengali", "bn"),
-    ("Marathi", "mr"),
-    ("Gujarati", "gu"),
-    ("Spanish", "es"),
-    ("Korean", "ko"),
-    ("French", "fr"),
-    ("Japanese", "ja"),
-    ("Arabic", "ar"),
 ]
 
 # create_all issues an existence check per table plus any DDL, so it is a burst
@@ -72,7 +52,6 @@ async def init_db():
         f"{time.monotonic() - started:.1f}s."
     )
     await _apply_column_migrations()
-    await _seed_languages()
 
 
 async def _create_all():
@@ -87,18 +66,3 @@ async def _apply_column_migrations():
         for table, column, ddl in COLUMN_MIGRATIONS:
             await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}"))
     logger.info(f"Applied {len(COLUMN_MIGRATIONS)} column migration(s).")
-
-
-async def _seed_languages():
-    """Populate the language catalog on first boot only.
-
-    A non-empty table is left untouched, so an operator's edits (adding a
-    language, deactivating one) survive every subsequent restart.
-    """
-    async with async_session_factory() as db:
-        count = (await db.execute(select(func.count()).select_from(Language))).scalar_one()
-        if count:
-            return
-        db.add_all(Language(name=name, code=code) for name, code in DEFAULT_LANGUAGES)
-        await db.commit()
-        logger.info(f"Seeded {len(DEFAULT_LANGUAGES)} default languages.")

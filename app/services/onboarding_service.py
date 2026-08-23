@@ -7,7 +7,6 @@ from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import is_uuid
-from app.models.language import Language
 from app.models.onboarding import OnboardingState
 from app.models.song import Artist, Song as SongModel
 from app.services.cache_service import cache_service
@@ -84,9 +83,23 @@ class OnboardingService:
         }
 
     @staticmethod
-    async def get_languages(db: AsyncSession) -> List[Language]:
-        stmt = select(Language).where(Language.is_active.is_(True)).order_by(Language.name)
-        return list((await db.execute(stmt)).scalars().all())
+    async def get_languages(db: AsyncSession) -> List[str]:
+        """Selectable languages, derived from what is actually in the catalog.
+
+        Not a maintained/seeded list: Gaana exposes no endpoint that returns
+        valid language names, so the only honest source is what has actually
+        been ingested into `songs` from real search/browse/trending calls. A
+        freshly deployed or just-cleared catalog legitimately has none yet --
+        the onboarding screen is expected to show an empty state and let the
+        user skip, not fall back to a hardcoded list.
+        """
+        stmt = (
+            select(SongModel.language)
+            .where(SongModel.language.isnot(None), SongModel.language != "")
+            .distinct()
+            .order_by(SongModel.language)
+        )
+        return [row[0] for row in (await db.execute(stmt)).all()]
 
     @staticmethod
     async def get_suggested_artists(
@@ -189,7 +202,7 @@ class OnboardingService:
         catalog is the source of truth the client is supposed to have picked
         from in the first place."""
         catalog = await OnboardingService.get_languages(db)
-        catalog_by_lower = {lang.name.lower(): lang.name for lang in catalog}
+        catalog_by_lower = {name.lower(): name for name in catalog}
 
         valid: List[str] = []
         for lang in languages:
