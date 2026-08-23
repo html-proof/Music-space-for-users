@@ -192,6 +192,14 @@ class Settings(BaseSettings):
     # rationale as ML_ADMIN_TOKEN: no admin role to hang authorization off, and
     # reads stay open to any authenticated user.
     LYRICS_ADMIN_TOKEN: Optional[str] = None
+
+    # Periodic check for new songs by followed artists, which fan out as
+    # notifications (see app/workers/release_watch_worker.py). Off by default
+    # for the same reason as ML_AUTO_TRAIN_ENABLED: on a single small instance
+    # it should run as a separate Render cron job (scripts/check_new_releases.py)
+    # rather than compete with request handling in-process.
+    RELEASE_WATCH_ENABLED: bool = False
+    RELEASE_WATCH_INTERVAL_MINUTES: int = 180
     # Fraction of each shelf given to unheard songs. Zero makes the feed
     # self-reinforcing: the ranker never sees evidence about songs it scores low.
     ML_EXPLORATION_RATE: float = 0.10

@@ -31,6 +31,7 @@ from app.api import (
     lyrics_router,
     downloads_router,
     onboarding_router,
+    notifications_router,
 )
 
 logging.basicConfig(
@@ -64,11 +65,20 @@ async def lifespan(app: FastAPI):
 
         trainer_task = asyncio.create_task(auto_train_loop())
 
+    release_watch_task = None
+    if settings.RELEASE_WATCH_ENABLED:
+        import asyncio
+        from app.workers.release_watch_worker import release_watch_loop
+
+        release_watch_task = asyncio.create_task(release_watch_loop())
+
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
     if trainer_task:
         trainer_task.cancel()
+    if release_watch_task:
+        release_watch_task.cancel()
     await player_pubsub.stop()
     await cache_service.close()
     await catalog_service.close()
@@ -184,6 +194,7 @@ app.include_router(ml_router)
 app.include_router(lyrics_router)
 app.include_router(downloads_router)
 app.include_router(onboarding_router)
+app.include_router(notifications_router)
 app.include_router(ws_router)
 
 

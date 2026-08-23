@@ -10,6 +10,7 @@ from app.models.ml import MLModel
 from app.models.lyrics import Lyrics
 from app.models.download import Download
 from app.models.onboarding import OnboardingState
+from app.models.notification import NotificationPreferences, Notification
 
 __all__ = [
     "Base",
@@ -36,4 +37,6 @@ __all__ = [
     "Lyrics",
     "Download",
     "OnboardingState",
+    "NotificationPreferences",
+    "Notification",
 ]

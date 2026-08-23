@@ -117,6 +117,15 @@ def verify_firebase_token(token: str) -> Dict[str, Any]:
         raise ValueError(f"Invalid Firebase ID token: {e}")
 
 
+def is_firebase_initialized() -> bool:
+    """Whether live Firebase Admin (auth verification, messaging) is available.
+
+    False in dev-mock mode -- callers that need to send FCM pushes must skip
+    rather than error, since there is no live app to send through.
+    """
+    return _firebase_initialized
+
+
 def delete_firebase_user(uid: str) -> bool:
     """Deletes a user from Firebase Auth if live Firebase is enabled."""
     if _firebase_initialized:
