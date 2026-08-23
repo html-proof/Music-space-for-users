@@ -53,23 +53,48 @@ class PlayerController extends ChangeNotifier {
 
   void setAudioQuality(String quality) => _audioQuality = quality;
 
+  /// Starts playback of `songs[startIndex]` as fast as possible, then fills
+  /// in the rest of the queue in the background.
+  ///
+  /// The previous implementation resolved every song's audio source (a
+  /// SQLite lookup per song, to check whether it's downloaded) sequentially
+  /// before calling setAudioSource at all -- for a 20-track album that's 20
+  /// awaited round trips before the tapped song even starts loading. Only the
+  /// tapped song's source is needed to start playback; the queue is rotated
+  /// so that song is first, played immediately, and everything else is
+  /// resolved in parallel (Future.wait, not a sequential loop) and appended
+  /// once ready.
   Future<void> playQueue(List<Song> songs, {int startIndex = 0}) async {
     if (songs.isEmpty) return;
-    _queue = songs;
+    final rotated = [...songs.sublist(startIndex), ...songs.sublist(0, startIndex)];
+    _queue = rotated;
 
-    final sources = <AudioSource>[];
-    for (final song in songs) {
-      final local = await _localDb.getDownloadedFile(song.id);
-      final uri = local != null ? Uri.file(local['local_path'] as String) : Uri.parse(_resolveUrl(song));
-      sources.add(AudioSource.uri(uri, tag: song.id));
-    }
-
-    await _player.setAudioSource(
-      ConcatenatingAudioSource(children: sources),
-      initialIndex: startIndex,
-    );
+    final firstSource = await _resolveSource(rotated.first);
+    await _player.setAudioSource(ConcatenatingAudioSource(children: [firstSource]));
     await _player.play();
     unawaited(_reportEvent('PLAY'));
+
+    if (rotated.length > 1) {
+      unawaited(_appendRemainingQueue(rotated));
+    }
+  }
+
+  Future<AudioSource> _resolveSource(Song song) async {
+    final local = await _localDb.getDownloadedFile(song.id);
+    final uri = local != null ? Uri.file(local['local_path'] as String) : Uri.parse(_resolveUrl(song));
+    return AudioSource.uri(uri, tag: song.id);
+  }
+
+  Future<void> _appendRemainingQueue(List<Song> rotatedQueue) async {
+    final sources = await Future.wait(rotatedQueue.sublist(1).map(_resolveSource));
+    // If another playQueue() call landed while these were resolving, _queue
+    // has already moved on -- these sources belong to a queue that's no
+    // longer playing, so don't append them to whatever is now.
+    if (!identical(rotatedQueue, _queue)) return;
+    final source = _player.audioSource;
+    if (source is ConcatenatingAudioSource) {
+      await source.addAll(sources);
+    }
   }
 
   String _resolveUrl(Song song) {
