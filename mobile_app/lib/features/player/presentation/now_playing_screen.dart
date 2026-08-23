@@ -5,10 +5,16 @@ import 'package:go_router/go_router.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../../shared/widgets/circle_icon_button.dart';
+import '../../../shared/widgets/primary_play_button.dart';
 import '../../downloads/application/downloads_providers.dart';
 import '../../library/application/library_providers.dart';
 import '../application/player_providers.dart';
 
+/// Full-bleed photographic layout: the song artwork covers the entire
+/// screen behind a dark scrim, with white overlay text/controls on top --
+/// matches the reference design's player screen, instead of a rounded
+/// artwork card sitting on a plain background.
 class NowPlayingScreen extends ConsumerWidget {
   const NowPlayingScreen({super.key});
 
@@ -32,131 +38,181 @@ class NowPlayingScreen extends ConsumerWidget {
     final position = player.position > duration ? duration : player.position;
 
     return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(icon: const Icon(Icons.keyboard_arrow_down), onPressed: () => context.pop()),
-        title: const Text('Now Playing'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 32),
-        child: Column(
-          children: [
-            const SizedBox(height: 16),
-            Expanded(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: song.thumbnailUrl == null
-                    ? Container(
-                        color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
-                        alignment: Alignment.center,
-                        child: Icon(Icons.music_note, size: 64, color: Colors.white.withValues(alpha: 0.85)),
-                      )
-                    : CachedNetworkImage(
-                        imageUrl: song.thumbnailUrl!,
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                        errorWidget: (_, __, ___) => Container(
-                          color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
-                          alignment: Alignment.center,
-                          child: Icon(Icons.music_note, size: 64, color: Colors.white.withValues(alpha: 0.85)),
-                        ),
-                      ),
+      backgroundColor: Colors.black,
+      extendBodyBehindAppBar: true,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          song.thumbnailUrl == null
+              ? Container(color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id))
+              : CachedNetworkImage(
+                  imageUrl: song.thumbnailUrl!,
+                  fit: BoxFit.cover,
+                  errorWidget: (_, __, ___) => Container(
+                    color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                  ),
+                ),
+          // Scrim gradient: near-clear at the top (for the app bar
+          // buttons), darkest at the bottom (for text/transport legibility).
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Colors.black45, Colors.transparent, Colors.black87],
+                stops: [0.0, 0.35, 1.0],
               ),
             ),
-            const SizedBox(height: 24),
-            Row(
+          ),
+          SafeArea(
+            child: Column(
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(song.title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis),
-                      Text(song.artistName, style: const TextStyle(color: AppColors.textSecondary, fontSize: 16)),
+                      CircleIconButton(
+                        icon: Icons.keyboard_arrow_down,
+                        background: Colors.black.withValues(alpha: 0.35),
+                        iconColor: Colors.white,
+                        onPressed: () => context.pop(),
+                      ),
+                      CircleIconButton(
+                        icon: Icons.more_vert,
+                        background: Colors.black.withValues(alpha: 0.35),
+                        iconColor: Colors.white,
+                        onPressed: () => context.push('/lyrics/${song.id}'),
+                      ),
                     ],
                   ),
                 ),
-                IconButton(
-                  icon: Icon(song.isLiked ? Icons.favorite : Icons.favorite_border, color: song.isLiked ? AppColors.accent : null),
-                  onPressed: () async {
-                    final repo = ref.read(libraryRepositoryProvider);
-                    if (song.isLiked) {
-                      await repo.unlikeSong(song.id);
-                    } else {
-                      await repo.likeSong(song.id);
-                    }
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Slider(
-              value: position.inMilliseconds.toDouble().clamp(0, duration.inMilliseconds.toDouble().clamp(1, double.infinity)),
-              max: duration.inMilliseconds.toDouble().clamp(1, double.infinity),
-              onChanged: (value) => player.seek(Duration(milliseconds: value.round())),
-            ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(_formatDuration(position), style: const TextStyle(color: AppColors.textSecondary)),
-                Text(_formatDuration(duration), style: const TextStyle(color: AppColors.textSecondary)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                IconButton(
-                  icon: Icon(Icons.shuffle, color: player.shuffleEnabled ? AppColors.accent : AppColors.textSecondary),
-                  onPressed: player.toggleShuffle,
-                ),
-                IconButton(icon: const Icon(Icons.skip_previous, size: 36), onPressed: player.previous),
-                // A solid white circle with a black icon, not the theme's
-                // accent-tinted filled button -- the reference design's
-                // transport play control reads as high-contrast chrome
-                // against the artwork, not a branded/colored action.
-                Container(
-                  width: 64,
-                  height: 64,
-                  decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                  child: IconButton(
-                    iconSize: 32,
-                    color: Colors.black,
-                    icon: Icon(player.isPlaying ? Icons.pause : Icons.play_arrow),
-                    onPressed: player.togglePlayPause,
+                const Spacer(),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              song.title,
+                              style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              song.artistName,
+                              style: TextStyle(color: Colors.white.withValues(alpha: 0.75), fontSize: 15),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          song.isLiked ? Icons.favorite : Icons.favorite_border,
+                          color: song.isLiked ? AppColors.accent : Colors.white,
+                        ),
+                        onPressed: () async {
+                          final repo = ref.read(libraryRepositoryProvider);
+                          if (song.isLiked) {
+                            await repo.unlikeSong(song.id);
+                          } else {
+                            await repo.likeSong(song.id);
+                          }
+                        },
+                      ),
+                    ],
                   ),
                 ),
-                IconButton(icon: const Icon(Icons.skip_next, size: 36), onPressed: player.next),
-                IconButton(
-                  icon: Icon(
-                    player.loopMode == LoopMode.one ? Icons.repeat_one : Icons.repeat,
-                    color: player.loopMode == LoopMode.off ? AppColors.textSecondary : AppColors.accent,
+                const SizedBox(height: 4),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      activeTrackColor: Colors.white,
+                      inactiveTrackColor: Colors.white.withValues(alpha: 0.3),
+                      thumbColor: Colors.white,
+                      trackHeight: 3,
+                    ),
+                    child: Slider(
+                      value: position.inMilliseconds.toDouble().clamp(0, duration.inMilliseconds.toDouble().clamp(1, double.infinity)),
+                      max: duration.inMilliseconds.toDouble().clamp(1, double.infinity),
+                      onChanged: (value) => player.seek(Duration(milliseconds: value.round())),
+                    ),
                   ),
-                  onPressed: player.cycleRepeatMode,
                 ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(_formatDuration(position), style: TextStyle(color: Colors.white.withValues(alpha: 0.75))),
+                      Text(_formatDuration(duration), style: TextStyle(color: Colors.white.withValues(alpha: 0.75))),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    IconButton(
+                      icon: Icon(Icons.shuffle, color: player.shuffleEnabled ? AppColors.accent : Colors.white70),
+                      onPressed: player.toggleShuffle,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.skip_previous, size: 36, color: Colors.white),
+                      onPressed: player.previous,
+                    ),
+                    PrimaryPlayButton(
+                      size: 64,
+                      icon: player.isPlaying ? Icons.pause : Icons.play_arrow,
+                      onPressed: player.togglePlayPause,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.skip_next, size: 36, color: Colors.white),
+                      onPressed: player.next,
+                    ),
+                    IconButton(
+                      icon: Icon(
+                        player.loopMode == LoopMode.one ? Icons.repeat_one : Icons.repeat,
+                        color: player.loopMode == LoopMode.off ? Colors.white70 : AppColors.accent,
+                      ),
+                      onPressed: player.cycleRepeatMode,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    IconButton(
+                      icon: downloadManager.isActive(song.id)
+                          ? SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                value: downloadManager.progressFor(song.id),
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.download_outlined, color: Colors.white70),
+                      onPressed: downloadManager.isActive(song.id) ? null : () => downloadManager.download(song),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.lyrics_outlined, color: Colors.white70),
+                      onPressed: () => context.push('/lyrics/${song.id}'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
               ],
             ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                IconButton(
-                  icon: downloadManager.isActive(song.id)
-                      ? SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, value: downloadManager.progressFor(song.id)),
-                        )
-                      : const Icon(Icons.download_outlined),
-                  onPressed: downloadManager.isActive(song.id) ? null : () => downloadManager.download(song),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.lyrics_outlined),
-                  onPressed: () => context.push('/lyrics/${song.id}'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

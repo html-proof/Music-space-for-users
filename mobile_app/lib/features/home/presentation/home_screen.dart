@@ -8,6 +8,7 @@ import '../../../shared/models/song.dart';
 import '../../../shared/widgets/async_value_view.dart';
 import '../../../shared/widgets/media_card.dart';
 import '../../../shared/widgets/section_header.dart';
+import '../../auth/application/auth_providers.dart';
 import '../../player/application/player_providers.dart';
 import '../application/home_providers.dart';
 
@@ -18,41 +19,74 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final feed = ref.watch(homeFeedProvider);
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('GaanaPy'),
-        actions: [
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: () async => ref.invalidate(homeFeedProvider),
+          child: AsyncValueView(
+            value: feed,
+            onRetry: () => ref.invalidate(homeFeedProvider),
+            data: (data) {
+              // The hero spotlights whatever the feed considers the strongest
+              // pick for this user: the top of the personalized mix, or the
+              // first item of the first shelf if there is no mix yet.
+              final heroQueue = data.topMix.isNotEmpty
+                  ? data.topMix
+                  : (data.categories.isNotEmpty ? data.categories.first.items : const <Song>[]);
+
+              return ListView(
+                children: [
+                  _HomeHeader(greeting: data.greeting),
+                  if (heroQueue.isNotEmpty) _FeaturedHero(song: heroQueue.first, queue: heroQueue),
+                  if (data.topMix.isNotEmpty) _SongRail(title: 'Made for you', songs: data.topMix),
+                  for (final category in data.categories)
+                    if (category.items.isNotEmpty) _SongRail(title: category.title, songs: category.items),
+                  const SizedBox(height: 24),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Avatar + time-of-day greeting header, plus quick actions -- matches the
+/// reference design's home header instead of a plain AppBar title.
+class _HomeHeader extends ConsumerWidget {
+  const _HomeHeader({required this.greeting});
+
+  final String greeting;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final user = ref.watch(currentUserProvider).valueOrNull;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 20,
+            backgroundColor: AppColors.surfaceRaised,
+            backgroundImage: user?.photoUrl != null ? NetworkImage(user!.photoUrl!) : null,
+            child: user?.photoUrl == null
+                ? const Icon(Icons.person, color: AppColors.textSecondary)
+                : null,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(greeting, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                if (user?.displayName != null)
+                  Text(user!.displayName!, style: const TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+              ],
+            ),
+          ),
           IconButton(icon: const Icon(Icons.download_outlined), onPressed: () => context.push('/downloads')),
           IconButton(icon: const Icon(Icons.settings_outlined), onPressed: () => context.push('/settings')),
         ],
-      ),
-      body: RefreshIndicator(
-        onRefresh: () async => ref.invalidate(homeFeedProvider),
-        child: AsyncValueView(
-          value: feed,
-          onRetry: () => ref.invalidate(homeFeedProvider),
-          data: (data) {
-            // The hero spotlights whatever the feed considers the strongest
-            // pick for this user: the top of the personalized mix, or the
-            // first item of the first shelf if there is no mix yet.
-            final heroQueue = data.topMix.isNotEmpty
-                ? data.topMix
-                : (data.categories.isNotEmpty ? data.categories.first.items : const <Song>[]);
-
-            return ListView(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  child: Text(data.greeting, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
-                ),
-                if (heroQueue.isNotEmpty) _FeaturedHero(song: heroQueue.first, queue: heroQueue),
-                if (data.topMix.isNotEmpty) _SongRail(title: 'Made for you', songs: data.topMix),
-                for (final category in data.categories)
-                  if (category.items.isNotEmpty) _SongRail(title: category.title, songs: category.items),
-                const SizedBox(height: 24),
-              ],
-            );
-          },
-        ),
       ),
     );
   }
@@ -176,6 +210,7 @@ class _SongRail extends ConsumerWidget {
                 subtitle: song.artistName,
                 imageUrl: song.thumbnailUrl,
                 onTap: () => ref.read(playerControllerProvider).playQueue(songs, startIndex: index),
+                onPlayTap: () => ref.read(playerControllerProvider).playQueue(songs, startIndex: index),
               );
             },
           ),

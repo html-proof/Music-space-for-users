@@ -1,20 +1,27 @@
 import 'package:flutter/material.dart';
 
-/// A warm, editorial palette -- vivid orange as the primary accent, with a
-/// rotating set of color-blocked tile colors (teal/pink/navy/gold) for
-/// artwork placeholders, on a near-black background. Not Spotify green, and
-/// not a single flat accent either: closer to a bold color-blocked poster
-/// than a typical music-app UI.
+/// A clean, minimal light palette: white/near-white surfaces, near-black
+/// primary text, mid-gray secondary text, and a single blue spot-accent for
+/// interactive/highlighted states -- matching the reference design's mostly
+/// monochrome look. Primary CTA chrome (play buttons) is plain black/white,
+/// handled directly by PrimaryPlayButton/ArtworkPlayOverlay rather than this
+/// accent, since the reference uses solid black or white circles for those
+/// regardless of the surrounding theme.
+///
+/// Most widgets in this app reference these constants directly rather than
+/// through Theme.of(context), so changing the values here re-skins the whole
+/// app; see AppTheme.light/.dark for the Material-level wiring used by
+/// widgets that do read the theme (buttons, sliders, chips).
 class AppColors {
   AppColors._();
 
-  static const accent = Color(0xFFFF7A3D);
-  static const accentMuted = Color(0xFFB8541F);
-  static const background = Color(0xFF0B0B12);
-  static const surface = Color(0xFF16161F);
-  static const surfaceRaised = Color(0xFF1F1F2C);
-  static const textPrimary = Color(0xFFF5F5FA);
-  static const textSecondary = Color(0xFFA0A0B2);
+  static const accent = Color(0xFF4A9DFF);
+  static const accentMuted = Color(0xFF2E6FBD);
+  static const background = Color(0xFFFFFFFF);
+  static const surface = Color(0xFFF7F7F9);
+  static const surfaceRaised = Color(0xFFEFEFF3);
+  static const textPrimary = Color(0xFF16161A);
+  static const textSecondary = Color(0xFF8A8A94);
   static const success = Color(0xFF3ECF8E);
   static const error = Color(0xFFEF5B5B);
 
@@ -34,19 +41,29 @@ class AppColors {
   /// rather than a random one on every frame.
   static Color tileColorFor(String key) => tileColors[key.hashCode.abs() % tileColors.length];
 
-  // Light-theme counterparts.
-  static const backgroundLight = Color(0xFFFAFAFC);
-  static const surfaceLight = Color(0xFFFFFFFF);
-  static const surfaceRaisedLight = Color(0xFFF0F0F5);
-  static const textPrimaryLight = Color(0xFF16161F);
-  static const textSecondaryLight = Color(0xFF62626E);
+  // AppTheme.light's Material-level colors. Kept equal to the constants
+  // above rather than a separate palette: most widgets in this app read
+  // AppColors.* directly (not Theme.of(context)), so a genuinely different
+  // dark-mode palette here would make Settings' theme toggle produce a
+  // visibly broken mixed-light-and-dark screen instead of an actual dark
+  // mode. Both AppTheme variants render the same look until that's fixed.
+  static const backgroundLight = background;
+  static const surfaceLight = surface;
+  static const surfaceRaisedLight = surfaceRaised;
+  static const textPrimaryLight = textPrimary;
+  static const textSecondaryLight = textSecondary;
 }
 
 class AppTheme {
   AppTheme._();
 
   static ThemeData get dark {
-    final base = ThemeData.dark(useMaterial3: true);
+    // Both AppTheme variants render the same light look (see the AppColors
+    // doc comment above), so this starts from ThemeData.light() too --
+    // ThemeData.dark()'s default icon/selection colors are tuned for a dark
+    // brightness and would risk near-invisible chrome anywhere this theme's
+    // explicit overrides below don't reach.
+    final base = ThemeData.light(useMaterial3: true);
     return base.copyWith(
       scaffoldBackgroundColor: AppColors.background,
       colorScheme: base.colorScheme.copyWith(

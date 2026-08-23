@@ -5,8 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/models/album.dart';
+import '../../../shared/widgets/artwork_play_overlay.dart';
 import '../../../shared/widgets/async_value_view.dart';
-import '../../../shared/widgets/primary_play_button.dart';
+import '../../../shared/widgets/circle_icon_button.dart';
 import '../../../shared/widgets/song_tile.dart';
 import '../../library/application/library_providers.dart';
 import '../../player/application/player_providers.dart';
@@ -64,14 +65,36 @@ class _AlbumScreenState extends ConsumerState<AlbumScreen> {
                     padding: const EdgeInsets.only(top: 60),
                     child: Column(
                       children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: SizedBox(
-                            width: 180,
-                            height: 180,
-                            child: album?.coverUrl == null
-                                ? Container(color: AppColors.surfaceRaised)
-                                : CachedNetworkImage(imageUrl: album!.coverUrl!, fit: BoxFit.cover),
+                        SizedBox(
+                          width: 180,
+                          height: 190,
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: SizedBox(
+                                  width: 180,
+                                  height: 180,
+                                  child: album?.coverUrl == null
+                                      ? Container(color: AppColors.surfaceRaised)
+                                      : CachedNetworkImage(imageUrl: album!.coverUrl!, fit: BoxFit.cover),
+                                ),
+                              ),
+                              // Overlapping the corner, not inset inside it --
+                              // matches the reference's play button sitting
+                              // half on/half off the artwork edge.
+                              Positioned(
+                                right: -8,
+                                bottom: -8,
+                                child: ArtworkPlayOverlay(
+                                  size: 44,
+                                  onTap: tracks.isEmpty
+                                      ? () {}
+                                      : () => ref.read(playerControllerProvider).playQueue(tracks),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -84,18 +107,31 @@ class _AlbumScreenState extends ConsumerState<AlbumScreen> {
               ),
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      PrimaryPlayButton(
+                      // Light-blue circular shuffle button, matching the
+                      // reference's single small accent button on this row --
+                      // the play action itself lives on the artwork overlay
+                      // above, not a second button here.
+                      CircleIconButton(
+                        icon: Icons.shuffle,
+                        background: AppColors.accent.withValues(alpha: 0.15),
+                        iconColor: AppColors.accent,
                         onPressed: tracks.isEmpty
                             ? null
-                            : () => ref.read(playerControllerProvider).playQueue(tracks),
+                            : () async {
+                                final player = ref.read(playerControllerProvider);
+                                if (!player.shuffleEnabled) await player.toggleShuffle();
+                                await player.playQueue(tracks);
+                              },
                       ),
-                      const SizedBox(width: 16),
-                      IconButton(
-                        icon: Icon(saved ? Icons.favorite : Icons.favorite_border),
-                        color: saved ? AppColors.accent : null,
+                      const SizedBox(width: 10),
+                      CircleIconButton(
+                        icon: saved ? Icons.favorite : Icons.favorite_border,
+                        background: AppColors.surfaceRaised,
+                        iconColor: saved ? AppColors.accent : AppColors.textPrimary,
                         onPressed: _toggleSave,
                       ),
                     ],
@@ -108,6 +144,7 @@ class _AlbumScreenState extends ConsumerState<AlbumScreen> {
                     final song = tracks[index];
                     return SongTile(
                       song: song,
+                      index: index + 1,
                       onTap: () => ref.read(playerControllerProvider).playQueue(tracks, startIndex: index),
                     );
                   },

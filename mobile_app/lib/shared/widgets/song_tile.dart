@@ -13,12 +13,19 @@ class SongTile extends ConsumerWidget {
     required this.onTap,
     this.trailing,
     this.dense = false,
+    this.index,
   });
 
   final Song song;
   final VoidCallback onTap;
   final Widget? trailing;
   final bool dense;
+
+  /// When set, shows a 1-based track number instead of the artwork
+  /// thumbnail, and a default cloud/drag-handle trailing row (unless
+  /// [trailing] is explicitly provided) -- matches the reference design's
+  /// numbered album/playlist track list rows.
+  final int? index;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -33,44 +40,53 @@ class SongTile extends ConsumerWidget {
       dense: dense,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       onTap: onTap,
-      leading: Stack(
-        alignment: Alignment.center,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: SizedBox(
-              width: 48,
-              height: 48,
-              child: song.thumbnailUrl == null
-                  ? Container(
-                      color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
-                      alignment: Alignment.center,
-                      child: Icon(Icons.music_note, color: Colors.white.withValues(alpha: 0.85)),
-                    )
-                  : CachedNetworkImage(
-                      imageUrl: song.thumbnailUrl!,
-                      fit: BoxFit.cover,
-                      errorWidget: (_, __, ___) => Container(
-                        color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
-                        alignment: Alignment.center,
-                        child: Icon(Icons.music_note, color: Colors.white.withValues(alpha: 0.85)),
-                      ),
-                    ),
-            ),
-          ),
-          if (isCurrent)
-            Container(
-              width: 48,
-              height: 48,
-              color: Colors.black.withValues(alpha: 0.45),
-              child: Icon(
-                isActive ? Icons.graphic_eq : Icons.pause,
-                color: AppColors.accent,
-                size: 20,
+      leading: index != null
+          ? SizedBox(
+              width: 32,
+              child: Center(
+                child: isCurrent
+                    ? Icon(isActive ? Icons.graphic_eq : Icons.pause, color: AppColors.accent, size: 18)
+                    : Text('$index', style: const TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600)),
               ),
+            )
+          : Stack(
+              alignment: Alignment.center,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: SizedBox(
+                    width: 48,
+                    height: 48,
+                    child: song.thumbnailUrl == null
+                        ? Container(
+                            color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                            alignment: Alignment.center,
+                            child: Icon(Icons.music_note, color: Colors.white.withValues(alpha: 0.85)),
+                          )
+                        : CachedNetworkImage(
+                            imageUrl: song.thumbnailUrl!,
+                            fit: BoxFit.cover,
+                            errorWidget: (_, __, ___) => Container(
+                              color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                              alignment: Alignment.center,
+                              child: Icon(Icons.music_note, color: Colors.white.withValues(alpha: 0.85)),
+                            ),
+                          ),
+                  ),
+                ),
+                if (isCurrent)
+                  Container(
+                    width: 48,
+                    height: 48,
+                    color: Colors.black.withValues(alpha: 0.45),
+                    child: Icon(
+                      isActive ? Icons.graphic_eq : Icons.pause,
+                      color: AppColors.accent,
+                      size: 20,
+                    ),
+                  ),
+              ],
             ),
-        ],
-      ),
       title: Text(
         song.title,
         maxLines: 1,
@@ -86,7 +102,17 @@ class SongTile extends ConsumerWidget {
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(color: AppColors.textSecondary),
       ),
-      trailing: trailing,
+      trailing: trailing ??
+          (index != null
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.cloud_download_outlined, color: AppColors.textSecondary, size: 20),
+                    SizedBox(width: 16),
+                    Icon(Icons.drag_handle, color: AppColors.textSecondary, size: 20),
+                  ],
+                )
+              : null),
     );
   }
 }

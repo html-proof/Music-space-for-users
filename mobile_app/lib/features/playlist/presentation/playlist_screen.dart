@@ -5,7 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/models/song.dart';
 import '../../../shared/widgets/async_value_view.dart';
-import '../../../shared/widgets/primary_play_button.dart';
+import '../../../shared/widgets/circle_icon_button.dart';
 import '../../../shared/widgets/song_tile.dart';
 import '../../player/application/player_providers.dart';
 import '../application/playlist_providers.dart';
@@ -66,10 +66,31 @@ class PlaylistScreen extends ConsumerWidget {
                       const SizedBox(height: 4),
                       Text('${data.songCount} songs', style: const TextStyle(color: AppColors.textSecondary)),
                       const SizedBox(height: 12),
-                      PrimaryPlayButton(
-                        onPressed: songs.isEmpty
-                            ? null
-                            : () => ref.read(playerControllerProvider).playQueue(songs),
+                      Row(
+                        children: [
+                          CircleIconButton(
+                            icon: Icons.play_arrow,
+                            size: 48,
+                            background: AppColors.textPrimary,
+                            iconColor: Colors.white,
+                            onPressed: songs.isEmpty
+                                ? null
+                                : () => ref.read(playerControllerProvider).playQueue(songs),
+                          ),
+                          const SizedBox(width: 10),
+                          CircleIconButton(
+                            icon: Icons.shuffle,
+                            background: AppColors.accent.withValues(alpha: 0.15),
+                            iconColor: AppColors.accent,
+                            onPressed: songs.isEmpty
+                                ? null
+                                : () async {
+                                    final player = ref.read(playerControllerProvider);
+                                    if (!player.shuffleEnabled) await player.toggleShuffle();
+                                    await player.playQueue(songs);
+                                  },
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -89,6 +110,7 @@ class PlaylistScreen extends ConsumerWidget {
                       final song = songs[index];
                       return SongTile(
                         song: song,
+                        index: index + 1,
                         onTap: () => ref.read(playerControllerProvider).playQueue(songs, startIndex: index),
                         trailing: IconButton(
                           icon: const Icon(Icons.remove_circle_outline),

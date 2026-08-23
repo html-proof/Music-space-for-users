@@ -2,6 +2,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
+import 'artwork_play_overlay.dart';
 
 /// A single artwork tile used in horizontal rails (home sections, search
 /// results grids). `circular` renders artist avatars.
@@ -19,6 +20,7 @@ class MediaCard extends StatelessWidget {
     required this.onTap,
     this.circular = false,
     this.width = 140,
+    this.onPlayTap,
   });
 
   final String title;
@@ -27,6 +29,12 @@ class MediaCard extends StatelessWidget {
   final VoidCallback onTap;
   final bool circular;
   final double width;
+
+  /// When set, shows the small black play-button overlay on the artwork's
+  /// bottom-right corner (songs/albums), matching the reference design.
+  /// Left null for artist avatars, where tapping the tile itself navigates
+  /// rather than plays.
+  final VoidCallback? onPlayTap;
 
   Widget _fallback() {
     return Container(
@@ -55,13 +63,24 @@ class MediaCard extends StatelessWidget {
               child: SizedBox(
                 width: width,
                 height: width,
-                child: imageUrl == null
-                    ? _fallback()
-                    : CachedNetworkImage(
-                        imageUrl: imageUrl!,
-                        fit: BoxFit.cover,
-                        errorWidget: (_, __, ___) => _fallback(),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    imageUrl == null
+                        ? _fallback()
+                        : CachedNetworkImage(
+                            imageUrl: imageUrl!,
+                            fit: BoxFit.cover,
+                            errorWidget: (_, __, ___) => _fallback(),
+                          ),
+                    if (onPlayTap != null)
+                      Positioned(
+                        right: 6,
+                        bottom: 6,
+                        child: ArtworkPlayOverlay(onTap: onPlayTap!),
                       ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 8),

@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
 
-/// Underline-indicator bottom nav (icon + label, active tab gets an accent
-/// underline bar beneath it) -- replaces Material's default
-/// BottomNavigationBar, whose active state is a colored icon/label with no
-/// separate indicator, to match the reference design's nav treatment.
+/// Plain icon + label bottom nav -- the active tab is just accent-colored,
+/// with no underline or pill indicator, matching the reference design's flat
+/// nav treatment. Replaces Material's default BottomNavigationBar only to
+/// keep sizing/spacing consistent with the rest of this custom theme.
 class AppBottomNav extends StatelessWidget {
   const AppBottomNav({super.key, required this.currentIndex, required this.onTap});
 
@@ -43,16 +43,6 @@ class AppBottomNav extends StatelessWidget {
                       fontSize: 11,
                       color: color,
                       fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    height: 3,
-                    width: active ? 18 : 0,
-                    decoration: BoxDecoration(
-                      color: AppColors.accent,
-                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
                 ],
