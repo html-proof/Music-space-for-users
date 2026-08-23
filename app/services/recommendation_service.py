@@ -482,11 +482,26 @@ class RecommendationService:
             if langs:
                 language = str(langs[0])
 
-        try:
-            trending_songs = await catalog_service.get_trending(db, language, limit=SHELF_SIZE)
-        except Exception:
-            logger.warning("trending shelf unavailable", exc_info=True)
-            trending_songs = []
+        # A single language with no Gaana coverage (or a request that timed
+        # out) must not leave the home screen with nothing in it -- English
+        # is Gaana's broadest-covered language and is tried next, unless it
+        # was already the first attempt.
+        fallback_languages = [language] + (["English"] if language != "English" else [])
+
+        async def _first_nonempty(fetch) -> List[Song]:
+            for lang in fallback_languages:
+                try:
+                    songs = await fetch(lang)
+                except Exception:
+                    logger.warning("catalog shelf fetch failed for %s", lang, exc_info=True)
+                    songs = []
+                if songs:
+                    return songs
+            return []
+
+        trending_songs = await _first_nonempty(
+            lambda lang: catalog_service.get_trending(db, lang, limit=SHELF_SIZE)
+        )
         if trending_songs:
             categories.append(RecommendationCategoryResponse(
                 id="trending",
@@ -496,11 +511,9 @@ class RecommendationService:
                 items=trending_songs,
             ))
 
-        try:
-            new_songs = await catalog_service.get_new_releases(db, language, limit=SHELF_SIZE)
-        except Exception:
-            logger.warning("new releases shelf unavailable", exc_info=True)
-            new_songs = []
+        new_songs = await _first_nonempty(
+            lambda lang: catalog_service.get_new_releases(db, lang, limit=SHELF_SIZE)
+        )
         if new_songs:
             categories.append(RecommendationCategoryResponse(
                 id="new_releases",

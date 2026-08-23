@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import List, Optional, Dict, Any
 from sqlalchemy import select, or_
@@ -8,6 +9,15 @@ from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
 
 logger = logging.getLogger("catalog_service")
+
+# GaanaPy's own aiohttp session has a 30s timeout, which is fine for a
+# foreground search but too generous for a home-feed shelf that must still
+# leave room for everything else in the same request (upserts, other
+# shelves) inside the client's 45s budget. Bounding just the raw network
+# call -- never the DB upserts that follow it -- means a slow/unresponsive
+# Gaana falls back to whatever is already cached in Postgres quickly instead
+# of stalling the whole response.
+TRENDING_FETCH_TIMEOUT_SECONDS = 8.0
 
 
 class CatalogService:
@@ -318,7 +328,13 @@ class CatalogService:
             res = await db.execute(stmt)
             return list(res.scalars().all())
 
-        raw = await self.gaana.get_trending(language, limit)
+        try:
+            raw = await asyncio.wait_for(
+                self.gaana.get_trending(language, limit), timeout=TRENDING_FETCH_TIMEOUT_SECONDS
+            )
+        except Exception:
+            logger.warning("trending fetch for %s timed out/failed", language, exc_info=True)
+            raw = None
         songs: List[Song] = []
         if isinstance(raw, list):
             for item in raw:
@@ -342,7 +358,13 @@ class CatalogService:
             res = await db.execute(stmt)
             return list(res.scalars().all())
 
-        raw = await self.gaana.get_new_releases(language, limit)
+        try:
+            raw = await asyncio.wait_for(
+                self.gaana.get_new_releases(language, limit), timeout=TRENDING_FETCH_TIMEOUT_SECONDS
+            )
+        except Exception:
+            logger.warning("new releases fetch for %s timed out/failed", language, exc_info=True)
+            raw = None
         songs: List[Song] = []
         if isinstance(raw, dict) and "tracks" in raw and isinstance(raw["tracks"], list):
             for item in raw["tracks"]:

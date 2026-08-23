@@ -114,6 +114,52 @@ async def test_favorite_artists_retrieve_candidates_before_any_history(db_sessio
 
 
 @pytest.mark.asyncio
+async def test_home_feed_trending_falls_back_to_english_when_preferred_language_has_no_coverage(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    """A user's preferred language may have no Gaana trending coverage (or
+    that call may fail/time out) -- the Trending shelf must still show
+    something rather than leaving the home screen with nothing in it,
+    the same way onboarding's artist suggestions already fall back across
+    languages."""
+    from app.services.catalog_service import catalog_service
+
+    async def fake_get_trending(language, limit):
+        if language != "English":
+            return []  # no coverage for the user's actual preference
+        return [{
+            "seokey": "fallback-trending-track",
+            "title": "Fallback Trending Track",
+            "artists": "Fallback Trending Artist",
+            "album": "Single",
+            "duration": "100",
+            "images": {"urls": {}},
+            "stream_urls": {"urls": {}},
+            "language": "English",
+            "genres": "Pop",
+            "is_explicit": False,
+        }]
+
+    async def empty_new_releases(language, limit):
+        return {"tracks": []}
+
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "get_new_releases", empty_new_releases)
+
+    patch_res = await client.patch(
+        "/api/users/preferences", json={"preferred_languages": ["Malayalam"]}, headers=auth_headers
+    )
+    assert patch_res.status_code == 200
+
+    res = await client.get("/api/recommendations/home", headers=auth_headers)
+    assert res.status_code == 200
+    categories = res.json()["data"]["categories"]
+    trending = next((c for c in categories if c["category_type"] == "trending"), None)
+    assert trending is not None
+    assert trending["items"][0]["title"] == "Fallback Trending Track"
+
+
+@pytest.mark.asyncio
 async def test_home_feed_catalog_shelves_refetch_on_cache_hit(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
