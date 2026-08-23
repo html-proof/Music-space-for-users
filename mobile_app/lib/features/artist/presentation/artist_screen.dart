@@ -42,7 +42,17 @@ class _ArtistScreenState extends ConsumerState<ArtistScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final seokey = widget.initialArtist?.seokey ?? widget.artistId;
+    // Prefer the real Gaana seokey, then the Gaana external_id -- both are
+    // identifiers Gaana itself issued. Falling straight to widget.artistId
+    // (our own DB id/UUID for an artist row with neither) sends something
+    // Gaana has never heard of to GET /api/catalog/artists/info, which is
+    // what surfaced as a timeout on this screen rather than a clean 404.
+    final initial = widget.initialArtist;
+    final seokey = (initial?.seokey?.isNotEmpty ?? false)
+        ? initial!.seokey!
+        : (initial?.externalId.isNotEmpty ?? false)
+            ? initial!.externalId
+            : widget.artistId;
     final details = ref.watch(artistDetailsProvider(seokey));
     final followed = _isFollowed ?? widget.initialArtist?.isFollowed ?? false;
 

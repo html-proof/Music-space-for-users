@@ -161,6 +161,7 @@ def _raw_trending_track(language: str) -> dict:
         "track_id": f"fallback-song-{language}",
         "title": "Fallback Track",
         "artists": f"Fallback Artist {language}",
+        "artist_seokeys": f"fallback-artist-{language.lower()}",
         "album": "Single",
         "duration": "100",
         "images": {"urls": {}},
@@ -188,9 +189,15 @@ async def test_get_suggested_artists_falls_back_when_catalog_thin(
 
     res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
-    names = {a["name"] for a in res.json()["data"]}
+    data = res.json()["data"]
+    names = {a["name"] for a in data}
     assert "Fallback Artist English" in names
     assert "Fallback Artist Hindi" in names
+    # Regression: the response must carry Gaana's real seokey, not just the
+    # numeric id, or a later artist-detail fetch for a selected artist has
+    # nothing valid to query Gaana with.
+    by_name = {a["name"]: a for a in data}
+    assert by_name["Fallback Artist English"]["seokey"] == "fallback-artist-english"
 
 
 @pytest.mark.asyncio
@@ -230,6 +237,34 @@ async def test_set_artists_updates_preferences_and_follows(
     followed_res = await client.get("/api/library/artists", headers=auth_headers)
     followed_names = {a["name"] for a in followed_res.json()["data"]}
     assert followed_names == {"Daft Punk", "Justice"}
+
+
+@pytest.mark.asyncio
+async def test_set_artists_persists_seokey_for_unpersisted_selection(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+):
+    """Selecting a Gaana-only artist (never in our DB) must persist its real
+    seokey, not just its numeric id -- without this, GET
+    /api/catalog/artists/info later has nothing valid to query Gaana with
+    (this was a real bug: artists selected off the unpersisted suggestions
+    list saved with seokey=None, and opening them from Library timed out)."""
+    res = await client.post(
+        "/api/onboarding/artists",
+        json={"artists": [{
+            "id": "774738",
+            "name": "Arijit Singh",
+            "seokey": "arijit-singh",
+            "image_url": "https://example.com/art.jpg",
+        }]},
+        headers=auth_headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["data"]["favorite_artists"] == ["Arijit Singh"]
+
+    followed_res = await client.get("/api/library/artists", headers=auth_headers)
+    followed = followed_res.json()["data"]
+    assert len(followed) == 1
+    assert followed[0]["seokey"] == "arijit-singh"
 
 
 @pytest.mark.asyncio

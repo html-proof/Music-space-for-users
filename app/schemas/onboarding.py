@@ -19,6 +19,10 @@ class ArtistSelectionRef(BaseModel):
     id: str
     name: Optional[str] = None
     image_url: Optional[str] = None
+    # Gaana's own slug, distinct from `id` -- without this, an artist
+    # created here has no way to be looked up again via
+    # GET /api/catalog/artists/info, which specifically needs the slug.
+    seokey: Optional[str] = None
 
 
 class OnboardingArtistsRequest(BaseModel):

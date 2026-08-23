@@ -60,7 +60,7 @@ class OnboardingRepository {
   Future<OnboardingStatus> setArtists(List<Artist> artists) async {
     final data = await _api.post('/api/onboarding/artists', body: {
       'artists': artists
-          .map((a) => {'id': a.id, 'name': a.name, 'image_url': a.imageUrl})
+          .map((a) => {'id': a.id, 'name': a.name, 'image_url': a.imageUrl, 'seokey': a.seokey})
           .toList(),
     });
     return OnboardingStatus.fromJson(data as Map<String, dynamic>);

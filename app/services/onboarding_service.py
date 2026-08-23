@@ -35,6 +35,11 @@ class SuggestedArtist:
     song_count: int = 0
     album_count: int = 0
     genres: list = field(default_factory=list)
+    # Gaana's own slug for this artist, distinct from `id` (which prefers the
+    # numeric artist_id): /api/catalog/artists/info specifically needs the
+    # slug, so this has to survive selection or a later artist-detail fetch
+    # for this artist has nothing valid to query Gaana with.
+    seokey: Optional[str] = None
 
 
 def _artist_stub_from_track(raw: dict) -> Optional[SuggestedArtist]:
@@ -55,6 +60,7 @@ def _artist_stub_from_track(raw: dict) -> Optional[SuggestedArtist]:
         id=ext_id,
         name=name,
         image_url=raw.get("artist_image") or None,
+        seokey=seokey,
     )
 
 
@@ -245,7 +251,11 @@ class OnboardingService:
                 if not name:
                     continue
                 artist = await catalog_service.get_or_create_artist(
-                    db, name=name, external_id=raw_id, image_url=ref.get("image_url"),
+                    db,
+                    name=name,
+                    external_id=raw_id,
+                    seokey=str(ref.get("seokey") or "").strip() or None,
+                    image_url=ref.get("image_url"),
                 )
             artists.append(artist)
             seen_ids.add(raw_id)

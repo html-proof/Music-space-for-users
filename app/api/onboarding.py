@@ -42,6 +42,10 @@ async def get_suggested_artists(
             "name": a.name,
             "image_url": a.image_url,
             "song_count": a.song_count,
+            # Needed so a later artist-detail fetch (GET /api/catalog/artists/info)
+            # has Gaana's real slug to query with, not just our own id -- see
+            # ArtistScreen and OnboardingService.set_artists.
+            "seokey": getattr(a, "seokey", None),
         }
         for a in artists
     ])
