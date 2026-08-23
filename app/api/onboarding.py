@@ -33,7 +33,7 @@ async def get_suggested_artists(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    artists = await onboarding_service.get_suggested_artists(db, limit=limit)
+    artists = await onboarding_service.get_suggested_artists(db, user_id=current_user.id, limit=limit)
     return api_response([
         {
             "id": a.id,

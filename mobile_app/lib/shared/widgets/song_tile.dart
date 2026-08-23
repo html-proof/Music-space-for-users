@@ -1,10 +1,12 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../features/player/application/player_providers.dart';
 import '../models/song.dart';
 
-class SongTile extends StatelessWidget {
+class SongTile extends ConsumerWidget {
   const SongTile({
     super.key,
     required this.song,
@@ -19,36 +21,62 @@ class SongTile extends StatelessWidget {
   final bool dense;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final player = ref.watch(playerControllerProvider);
+    // Tapping a song should visibly become "now playing", not just silently
+    // start audio -- this is what actually renders that state in every list
+    // the tile appears in (home, search, library, playlists, artist pages).
+    final isCurrent = player.currentSong?.id == song.id;
+    final isActive = isCurrent && player.isPlaying;
+
     return ListTile(
       dense: dense,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       onTap: onTap,
-      leading: ClipRRect(
-        borderRadius: BorderRadius.circular(6),
-        child: SizedBox(
-          width: 48,
-          height: 48,
-          child: song.thumbnailUrl == null
-              ? Container(
-                  color: AppColors.surfaceRaised,
-                  child: const Icon(Icons.music_note, color: AppColors.textSecondary),
-                )
-              : CachedNetworkImage(
-                  imageUrl: song.thumbnailUrl!,
-                  fit: BoxFit.cover,
-                  errorWidget: (_, __, ___) => Container(
-                    color: AppColors.surfaceRaised,
-                    child: const Icon(Icons.music_note, color: AppColors.textSecondary),
-                  ),
-                ),
-        ),
+      leading: Stack(
+        alignment: Alignment.center,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: SizedBox(
+              width: 48,
+              height: 48,
+              child: song.thumbnailUrl == null
+                  ? Container(
+                      color: AppColors.surfaceRaised,
+                      child: const Icon(Icons.music_note, color: AppColors.textSecondary),
+                    )
+                  : CachedNetworkImage(
+                      imageUrl: song.thumbnailUrl!,
+                      fit: BoxFit.cover,
+                      errorWidget: (_, __, ___) => Container(
+                        color: AppColors.surfaceRaised,
+                        child: const Icon(Icons.music_note, color: AppColors.textSecondary),
+                      ),
+                    ),
+            ),
+          ),
+          if (isCurrent)
+            Container(
+              width: 48,
+              height: 48,
+              color: Colors.black.withValues(alpha: 0.45),
+              child: Icon(
+                isActive ? Icons.graphic_eq : Icons.pause,
+                color: AppColors.accent,
+                size: 20,
+              ),
+            ),
+        ],
       ),
       title: Text(
         song.title,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontWeight: FontWeight.w600),
+        style: TextStyle(
+          fontWeight: FontWeight.w600,
+          color: isCurrent ? AppColors.accent : null,
+        ),
       ),
       subtitle: Text(
         song.artistName,

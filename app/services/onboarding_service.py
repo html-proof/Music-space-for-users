@@ -1,13 +1,13 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import is_uuid
 from app.models.language import Language
 from app.models.onboarding import OnboardingState
-from app.models.song import Artist
+from app.models.song import Artist, Song as SongModel
 from app.services.cache_service import cache_service
 from app.services.catalog_service import catalog_service
 from app.services.library_service import library_service
@@ -47,27 +47,62 @@ class OnboardingService:
         return list((await db.execute(stmt)).scalars().all())
 
     @staticmethod
-    async def get_suggested_artists(db: AsyncSession, limit: int = 30) -> List[Artist]:
+    async def get_suggested_artists(db: AsyncSession, user_id: Optional[str] = None, limit: int = 30) -> List[Artist]:
         """Artists to show on the onboarding artist-selection screen.
 
         Backed by the real catalog (ranked by song_count) rather than a
-        hardcoded list. On a freshly deployed, still-empty catalog this falls
-        back to pulling trending songs for a couple of default languages --
-        which upserts their artists as a side effect -- so onboarding never
-        has to show an empty screen.
+        hardcoded list, and -- when `user_id` is given -- biased toward
+        whatever the user just picked on the language-selection screen right
+        before this one: onboarding is language-then-artists, so by the time
+        this runs `preferred_languages` is already saved and is exactly the
+        signal this screen should use instead of a fixed default.
+
+        On a freshly deployed, still-empty catalog this falls back to pulling
+        trending songs for those languages (or English/Hindi if the user has
+        none saved yet) -- which upserts their artists as a side effect -- so
+        onboarding never has to show an empty screen.
         """
+        preferred_languages: List[str] = []
+        if user_id and is_uuid(user_id):
+            pref = await UserService.get_preferences(db, user_id)
+            preferred_languages = [lang for lang in (pref.preferred_languages or []) if lang]
+
+        fallback_languages = preferred_languages or ["English", "Hindi"]
+
         stmt = (
             select(Artist)
-            .where(Artist.song_count > 0)
+            .join(SongModel, SongModel.artist_id == Artist.id)
+            .where(Artist.song_count > 0, SongModel.language.in_(preferred_languages))
+            .distinct()
             .order_by(Artist.song_count.desc(), Artist.album_count.desc())
             .limit(limit)
-        )
-        artists = list((await db.execute(stmt)).scalars().all())
+        ) if preferred_languages else None
+
+        artists: List[Artist] = []
+        if stmt is not None:
+            artists = list((await db.execute(stmt)).scalars().all())
+
+        if len(artists) < min(limit, 10):
+            # No language saved yet, or too few artists match it -- fall back
+            # to the unfiltered top-artists ranking rather than showing (or
+            # padding out) a near-empty screen.
+            seen_ids = {a.id for a in artists}
+            fallback_stmt = (
+                select(Artist)
+                .where(Artist.song_count > 0)
+                .order_by(Artist.song_count.desc(), Artist.album_count.desc())
+                .limit(limit)
+            )
+            for artist in (await db.execute(fallback_stmt)).scalars().all():
+                if artist.id not in seen_ids:
+                    artists.append(artist)
+                    seen_ids.add(artist.id)
+
         if len(artists) >= min(limit, 10):
-            return artists
+            return artists[:limit]
 
         seen = {a.id for a in artists}
-        for language in ("English", "Hindi"):
+        for language in fallback_languages:
             # Only the raw network call is inside wait_for, never a DB
             # operation: catalog_service.get_trending mixes the Gaana fetch
             # with upserts/commits on `db`, and asyncio.wait_for cancels

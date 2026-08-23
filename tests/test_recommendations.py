@@ -44,6 +44,39 @@ async def test_recommendations_home_feed(client: AsyncClient, auth_headers: dict
 
 
 @pytest.mark.asyncio
+async def test_home_feed_uses_preferred_language_for_a_brand_new_user(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+):
+    """A freshly onboarded user has no listening history or likes yet --
+    without seeding affinities from their declared preferred_languages, the
+    home feed falls back to a fully generic, unfiltered list and their
+    onboarding choice is invisible until they've actually played something."""
+    english_song = Song(
+        external_id="rec-lang-en", title="English Track", artist_name="Artist EN",
+        language="English", genre="Pop", duration=200,
+    )
+    malayalam_song = Song(
+        external_id="rec-lang-ml", title="Malayalam Track", artist_name="Artist ML",
+        language="Malayalam", genre="Pop", duration=200,
+    )
+    db_session.add(english_song)
+    db_session.add(malayalam_song)
+    await db_session.commit()
+
+    patch_res = await client.patch(
+        "/api/users/preferences", json={"preferred_languages": ["Malayalam"]}, headers=auth_headers
+    )
+    assert patch_res.status_code == 200
+
+    res = await client.get("/api/recommendations/home", headers=auth_headers)
+    assert res.status_code == 200
+    categories = res.json()["data"]["categories"]
+    made_for_you = next(c for c in categories if c["category_type"] == "made_for_you")
+    languages = {item["language"] for item in made_for_you["items"]}
+    assert languages == {"Malayalam"}
+
+
+@pytest.mark.asyncio
 async def test_similar_songs_and_moods(client: AsyncClient, db_session: AsyncSession):
     songs = await seed_recommendation_catalog(db_session)
 

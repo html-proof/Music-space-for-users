@@ -45,8 +45,19 @@ class NowPlayingScreen extends ConsumerWidget {
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
                 child: song.thumbnailUrl == null
-                    ? Container(color: AppColors.surfaceRaised)
-                    : CachedNetworkImage(imageUrl: song.thumbnailUrl!, fit: BoxFit.cover, width: double.infinity),
+                    ? Container(
+                        color: AppColors.surfaceRaised,
+                        child: const Icon(Icons.music_note, size: 64, color: AppColors.textSecondary),
+                      )
+                    : CachedNetworkImage(
+                        imageUrl: song.thumbnailUrl!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        errorWidget: (_, __, ___) => Container(
+                          color: AppColors.surfaceRaised,
+                          child: const Icon(Icons.music_note, size: 64, color: AppColors.textSecondary),
+                        ),
+                      ),
               ),
             ),
             const SizedBox(height: 24),

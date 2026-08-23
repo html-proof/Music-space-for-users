@@ -14,7 +14,7 @@ import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import select, desc, func
+from sqlalchemy import and_, select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
@@ -84,6 +84,23 @@ class RecommendationService:
                 artist_scores[song.artist_name] = artist_scores.get(song.artist_name, 0.0) + 3.0
             if song.genre:
                 genre_scores[song.genre] = genre_scores.get(song.genre, 0.0) + 2.0
+
+        # Seed with explicitly declared onboarding preferences too, not just
+        # observed behaviour. A freshly onboarded user has no listening
+        # history or likes yet, so without this every score dict above is
+        # empty and the home feed falls back to a fully generic, unfiltered
+        # list -- silently ignoring the language and artists they just chose.
+        if is_uuid(user_id):
+            pref = (
+                await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_id))
+            ).scalar_one_or_none()
+            if pref:
+                for lang in pref.preferred_languages or []:
+                    language_scores[lang] = language_scores.get(lang, 0.0) + 1.0
+                for artist in pref.favorite_artists or []:
+                    artist_scores[artist] = artist_scores.get(artist, 0.0) + 1.0
+                for genre in pref.favorite_genres or []:
+                    genre_scores[genre] = genre_scores.get(genre, 0.0) + 1.0
 
         return {
             "top_artists": [k for k, v in sorted(artist_scores.items(), key=lambda x: x[1], reverse=True) if v > 0],
@@ -314,15 +331,29 @@ class RecommendationService:
         affinities = await RecommendationService.calculate_user_affinities(db, user_id)
         categories: List[RecommendationCategoryResponse] = []
 
+        # top_languages was computed above but never consulted here -- a
+        # declared/observed language preference is at least as strong a
+        # signal as genre, so it filters made_for_you the same way.
         made_for_you_songs: List[Song] = []
+        filters = []
         if affinities["top_genres"]:
-            stmt = (
-                select(Song)
-                .where(Song.genre.in_(affinities["top_genres"][:3]))
-                .order_by(Song.play_count.desc())
-                .limit(SHELF_SIZE)
-            )
+            filters.append(Song.genre.in_(affinities["top_genres"][:3]))
+        if affinities["top_languages"]:
+            filters.append(Song.language.in_(affinities["top_languages"][:3]))
+
+        if filters:
+            stmt = select(Song).where(and_(*filters)).order_by(Song.play_count.desc()).limit(SHELF_SIZE)
             made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+            if not made_for_you_songs and len(filters) > 1:
+                # Genre + language together may be too narrow on a small
+                # catalog -- relax to language alone, the stronger signal.
+                stmt = (
+                    select(Song)
+                    .where(Song.language.in_(affinities["top_languages"][:3]))
+                    .order_by(Song.play_count.desc())
+                    .limit(SHELF_SIZE)
+                )
+                made_for_you_songs = list((await db.execute(stmt)).scalars().all())
 
         if not made_for_you_songs:
             stmt = select(Song).order_by(Song.play_count.desc()).limit(SHELF_SIZE)

@@ -2,7 +2,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.language import Language
-from app.models.song import Artist
+from app.models.song import Artist, Song
 
 
 async def seed_artists(db: AsyncSession):
@@ -14,6 +14,28 @@ async def seed_artists(db: AsyncSession):
     await db.refresh(a1)
     await db.refresh(a2)
     return a1, a2
+
+
+async def seed_artists_with_language_songs(db: AsyncSession):
+    """Two artists, each with a song in a different language."""
+    a_en = Artist(external_id="art-lang-en", name="English Artist", song_count=1)
+    a_ml = Artist(external_id="art-lang-ml", name="Malayalam Artist", song_count=1)
+    db.add(a_en)
+    db.add(a_ml)
+    await db.commit()
+    await db.refresh(a_en)
+    await db.refresh(a_ml)
+
+    db.add(Song(
+        external_id="song-lang-en", title="English Song", artist_id=a_en.id,
+        artist_name=a_en.name, language="English", duration=180,
+    ))
+    db.add(Song(
+        external_id="song-lang-ml", title="Malayalam Song", artist_id=a_ml.id,
+        artist_name=a_ml.name, language="Malayalam", duration=180,
+    ))
+    await db.commit()
+    return a_en, a_ml
 
 
 async def seed_languages(db: AsyncSession):
@@ -107,6 +129,27 @@ async def test_get_suggested_artists(client: AsyncClient, auth_headers: dict, db
     names = [a["name"] for a in data]
     # Ranked by song_count desc.
     assert names[:2] == ["Daft Punk", "Justice"]
+
+
+@pytest.mark.asyncio
+async def test_get_suggested_artists_biased_by_preferred_language(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+):
+    """Onboarding is language-then-artists: by the time this screen loads,
+    the user's language choice is already saved and should drive which
+    artists show up first, not a fixed default."""
+    await seed_languages(db_session)
+    a_en, a_ml = await seed_artists_with_language_songs(db_session)
+
+    await client.post(
+        "/api/onboarding/languages", json={"languages": ["Malayalam"]}, headers=auth_headers
+    )
+
+    res = await client.get("/api/onboarding/artists/suggestions?limit=1", headers=auth_headers)
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert len(data) == 1
+    assert data[0]["name"] == "Malayalam Artist"
 
 
 def _raw_trending_track(language: str) -> dict:
