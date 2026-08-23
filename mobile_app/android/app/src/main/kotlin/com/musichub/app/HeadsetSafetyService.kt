@@ -58,7 +58,7 @@ class HeadsetSafetyService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var isHeadsetConnected = false
 
-    private val reminderRunnable = Runnable {
+    private val reminderRunnable: Runnable = Runnable {
         postReminderNotification()
         // Safety reminders, not a one-shot: keep nudging every additional
         // hour for as long as the headset stays on.
