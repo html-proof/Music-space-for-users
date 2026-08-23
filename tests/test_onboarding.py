@@ -109,36 +109,61 @@ async def test_get_suggested_artists(client: AsyncClient, auth_headers: dict, db
     assert names[:2] == ["Daft Punk", "Justice"]
 
 
+def _raw_trending_track(language: str) -> dict:
+    return {
+        "seokey": f"fallback-song-{language}",
+        "track_id": f"fallback-song-{language}",
+        "title": "Fallback Track",
+        "artists": f"Fallback Artist {language}",
+        "album": "Single",
+        "duration": "100",
+        "images": {"urls": {}},
+        "stream_urls": {"urls": {}},
+        "language": language,
+        "genres": "Pop",
+        "is_explicit": False,
+    }
+
+
 @pytest.mark.asyncio
 async def test_get_suggested_artists_falls_back_when_catalog_thin(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
+    """Only the raw Gaana network call is mocked (not catalog_service.get_trending
+    as a whole) -- get_suggested_artists deliberately calls the raw client
+    itself and does its own upsert, so that a timeout only ever cancels the
+    network leg, never a live DB commit. See onboarding_service.py."""
     from app.services.catalog_service import catalog_service
-    from app.models.song import Artist as ArtistModel, Song as SongModel
 
-    async def fake_get_trending_songs(db, language, limit):
-        artist = ArtistModel(external_id=f"fallback-artist-{language}", name="Fallback Artist")
-        db_session.add(artist)
-        await db_session.commit()
-        await db_session.refresh(artist)
-        song = SongModel(
-            external_id=f"fallback-song-{language}",
-            title="Fallback Track",
-            artist_id=artist.id,
-            artist_name=artist.name,
-            duration=100,
-        )
-        db_session.add(song)
-        await db_session.commit()
-        await db_session.refresh(song)
-        return [song]
+    async def fake_get_trending(language, limit):
+        return [_raw_trending_track(language)]
 
-    monkeypatch.setattr(catalog_service, "get_trending", fake_get_trending_songs)
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
 
     res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
     names = {a["name"] for a in res.json()["data"]}
-    assert "Fallback Artist" in names
+    assert "Fallback Artist English" in names
+    assert "Fallback Artist Hindi" in names
+
+
+@pytest.mark.asyncio
+async def test_get_suggested_artists_skips_language_on_upstream_failure(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    """An unreachable/erroring upstream must not fail the whole request --
+    onboarding should still respond (possibly with an empty list) rather
+    than 500 or hang."""
+    from app.services.catalog_service import catalog_service
+
+    async def failing_get_trending(language, limit):
+        raise RuntimeError("upstream unreachable")
+
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", failing_get_trending)
+
+    res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["data"] == []
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List
@@ -67,8 +68,26 @@ class OnboardingService:
 
         seen = {a.id for a in artists}
         for language in ("English", "Hindi"):
-            songs = await catalog_service.get_trending(db, language=language, limit=20)
-            for song in songs:
+            # Only the raw network call is inside wait_for, never a DB
+            # operation: catalog_service.get_trending mixes the Gaana fetch
+            # with upserts/commits on `db`, and asyncio.wait_for cancels
+            # whatever it's wrapping on timeout -- cancelling mid-commit can
+            # leave an AsyncSession unusable for the rest of the request.
+            # This is a "don't show an empty screen" nicety, not something
+            # worth blocking on or risking the session over, so it gets a
+            # tight budget and just skips the language on a miss (the search
+            # box in the UI is always available regardless).
+            try:
+                raw = await asyncio.wait_for(catalog_service.gaana.get_trending(language, 20), timeout=4.0)
+            except Exception:
+                logger.warning("onboarding artist suggestions: get_trending(%s) unavailable, skipping", language)
+                continue
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                if not (isinstance(item, dict) and "seokey" in item):
+                    continue
+                song = await catalog_service.upsert_gaana_song(db, item)
                 if song.artist_id and song.artist_id not in seen:
                     artist = (await db.execute(select(Artist).where(Artist.id == song.artist_id))).scalar_one_or_none()
                     if artist:
