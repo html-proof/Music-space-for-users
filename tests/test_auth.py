@@ -1,5 +1,34 @@
+import base64
+import json
 import pytest
 from httpx import AsyncClient
+
+
+def _mock_token(uid: str, sign_in_provider: str) -> str:
+    payload = {
+        "uid": uid,
+        "email": f"{uid}@example.com",
+        "firebase": {"sign_in_provider": sign_in_provider},
+    }
+    return "mock_" + base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+@pytest.mark.asyncio
+async def test_auth_me_rejects_password_provider(client: AsyncClient):
+    headers = {"Authorization": f"Bearer {_mock_token('pwuser', 'password')}"}
+    response = await client.get("/api/auth/me", headers=headers)
+    assert response.status_code == 401
+    data = response.json()
+    assert data["success"] is False
+    assert data["error"]["code"] == "PROVIDER_NOT_ALLOWED"
+
+
+@pytest.mark.asyncio
+async def test_auth_me_accepts_google_provider(client: AsyncClient):
+    headers = {"Authorization": f"Bearer {_mock_token('guser', 'google.com')}"}
+    response = await client.get("/api/auth/me", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["success"] is True
 
 
 @pytest.mark.asyncio
