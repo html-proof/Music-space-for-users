@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     # endpoint is a free denial-of-service -- so with no token set, the endpoint
     # refuses every request rather than defaulting to open.
     ML_ADMIN_TOKEN: Optional[str] = None
+    # Shared secret for writing lyrics (POST/DELETE /api/songs/{id}/lyrics), same
+    # rationale as ML_ADMIN_TOKEN: no admin role to hang authorization off, and
+    # reads stay open to any authenticated user.
+    LYRICS_ADMIN_TOKEN: Optional[str] = None
     # Fraction of each shelf given to unheard songs. Zero makes the feed
     # self-reinforcing: the ranker never sees evidence about songs it scores low.
     ML_EXPLORATION_RATE: float = 0.10
