@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "404503869615-j7d443ua30bjtgjpgkbcf51vqbh2aqil.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.musichub.app",
+            "certificate_hash": "458901b726cf86eedc344fd2a5d81db73177db87"
+          }
+        },
+        {
           "client_id": "404503869615-e2fsqe0iq9hef237nuoa3binjr4ol5jm.apps.googleusercontent.com",
           "client_type": 3
         }
