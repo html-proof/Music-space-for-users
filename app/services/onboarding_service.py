@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import select
@@ -102,7 +103,18 @@ class OnboardingService:
             return artists[:limit]
 
         seen = {a.id for a in artists}
+        # Each upserted song costs several DB round trips (artist lookup-or-
+        # create, album lookup-or-create, the song itself), each its own
+        # commit -- on an empty/thin catalog every track is a miss, so this
+        # loop is bounded by wall-clock time, not just a per-call timeout,
+        # and stops the moment it has enough artists rather than always
+        # working through every track of every language. The budget is well
+        # under the client's request timeout so a slow pass still returns
+        # something instead of the client timing out first.
+        deadline = time.monotonic() + 12.0
         for language in fallback_languages:
+            if len(artists) >= limit or time.monotonic() >= deadline:
+                break
             # Only the raw network call is inside wait_for, never a DB
             # operation: catalog_service.get_trending mixes the Gaana fetch
             # with upserts/commits on `db`, and asyncio.wait_for cancels
@@ -120,6 +132,8 @@ class OnboardingService:
             if not isinstance(raw, list):
                 continue
             for item in raw:
+                if len(artists) >= limit or time.monotonic() >= deadline:
+                    break
                 if not (isinstance(item, dict) and "seokey" in item):
                     continue
                 song = await catalog_service.upsert_gaana_song(db, item)
@@ -128,8 +142,6 @@ class OnboardingService:
                     if artist:
                         artists.append(artist)
                         seen.add(artist.id)
-            if len(artists) >= limit:
-                break
         return artists[:limit]
 
     @staticmethod
