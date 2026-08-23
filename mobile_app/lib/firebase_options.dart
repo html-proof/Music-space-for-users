@@ -1,8 +1,9 @@
-// GENERATED PLACEHOLDER -- replace by running `flutterfire configure` from
-// the `mobile_app/` directory once you have a real Firebase project with
-// Google Sign-In enabled as the only provider. These values do not point at
-// a real project and the app cannot authenticate until you regenerate this
-// file (`dart pub global activate flutterfire_cli` then `flutterfire configure`).
+// Android values are real, sourced from android/app/google-services.json
+// (project "personal-songs" -- the same Firebase project the backend's
+// FIREBASE_PROJECT_ID points at, see render.yaml). iOS is still a
+// placeholder: add an iOS app in the Firebase console and re-run
+// `flutterfire configure` (or fill in GoogleService-Info.plist's values by
+// hand) before building for iOS.
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 
@@ -28,11 +29,11 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'REPLACE_ME',
-    appId: 'REPLACE_ME',
-    messagingSenderId: 'REPLACE_ME',
-    projectId: 'REPLACE_ME',
-    storageBucket: 'REPLACE_ME.appspot.com',
+    apiKey: 'AIzaSyBKWWqGjEr4KZUIqgCW-uXnBdx-Z7wo-Qk',
+    appId: '1:404503869615:android:ae7494d0fe31e807dc7c5a',
+    messagingSenderId: '404503869615',
+    projectId: 'personal-songs',
+    storageBucket: 'personal-songs.firebasestorage.app',
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
