@@ -28,10 +28,21 @@ class PlayerPubSub:
     instance only holds the sockets for the devices connected to it.
     """
 
+    # Reconnect backoff grows 5s, 10s, 20s ... capped, so a permanent failure
+    # (e.g. a bad REDIS_URL) settles into rare retries instead of hammering
+    # every 5s. The exponent is clamped to keep the shift cheap.
+    _BASE_BACKOFF_SECONDS = 5
+    _MAX_BACKOFF_SECONDS = 300
+
     def __init__(self):
         self._task: Optional[asyncio.Task] = None
         self._pubsub = None
         self._stopping = False
+
+    @classmethod
+    def _backoff(cls, failures: int) -> int:
+        exp = min(failures, 10)
+        return min(cls._BASE_BACKOFF_SECONDS * (2 ** exp), cls._MAX_BACKOFF_SECONDS)
 
     async def start(self) -> bool:
         if not settings.REDIS_ENABLED:
@@ -50,16 +61,26 @@ class PlayerPubSub:
         return True
 
     async def _run(self) -> None:
+        # An auth/config failure is permanent, not a transient blip: retrying
+        # every 5s and logging each time floods the log forever. Only the first
+        # sighting of an error (or a changed one) is a WARNING; the same error
+        # repeating is demoted to DEBUG. A successful subscribe resets both, so
+        # genuine transient drops stay visible.
+        failures = 0
+        last_error: Optional[str] = None
         while not self._stopping:
             try:
                 client = await cache_service.get_client()
                 if client is None:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(self._backoff(failures))
+                    failures += 1
                     continue
 
                 self._pubsub = client.pubsub()
                 await self._pubsub.psubscribe(PLAYER_CHANNEL_PATTERN)
                 logger.info(f"Subscribed to {PLAYER_CHANNEL_PATTERN} for playback fan-out.")
+                failures = 0
+                last_error = None
 
                 async for raw in self._pubsub.listen():
                     if self._stopping:
@@ -73,8 +94,21 @@ class PlayerPubSub:
             except Exception as e:
                 if self._stopping:
                     break
-                logger.warning(f"Playback pub/sub listener error ({e}); reconnecting in 5s.")
-                await asyncio.sleep(5)
+                delay = self._backoff(failures)
+                message = str(e)
+                if message != last_error:
+                    logger.warning(
+                        f"Playback pub/sub listener error ({message}); "
+                        f"reconnecting in {delay}s."
+                    )
+                    last_error = message
+                else:
+                    logger.debug(
+                        f"Playback pub/sub still failing ({message}); "
+                        f"retrying in {delay}s."
+                    )
+                failures += 1
+                await asyncio.sleep(delay)
             finally:
                 await self._close_pubsub()
 
