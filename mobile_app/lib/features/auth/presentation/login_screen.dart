@@ -30,9 +30,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     try {
       await ref.read(authRepositoryProvider).signInWithGoogle();
       // currentUserProvider re-syncs automatically off the Firebase auth
-      // state change; wait for it so we know onboarding status before routing.
-      await ref.read(currentUserProvider.future);
-      final status = await ref.read(onboardingStatusProvider.future);
+      // state change; wait for it so we know onboarding status before
+      // routing. Bounded so a dead/slow backend can't leave the button
+      // spinning forever -- the catch below surfaces it as a normal error.
+      const timeout = Duration(seconds: 12);
+      await ref.read(currentUserProvider.future).timeout(timeout);
+      final status = await ref.read(onboardingStatusProvider.future).timeout(timeout);
       if (!mounted) return;
       if (status == null || !status.completed) {
         context.go('/onboarding/languages');

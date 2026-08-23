@@ -21,7 +21,14 @@ final firebaseUserProvider = StreamProvider<User?>((ref) {
 /// The backend `users` row for whoever is currently signed in, re-synced
 /// every time Firebase's auth state changes. Null while signed out.
 final currentUserProvider = FutureProvider<AppUser?>((ref) async {
-  final firebaseUser = ref.watch(firebaseUserProvider).value;
+  // `.future`, not `ref.watch(firebaseUserProvider).value`: the latter reads
+  // whatever the StreamProvider's AsyncValue holds *right now*, which on a
+  // cold start is `loading` (value == null) because authStateChanges()
+  // hasn't emitted its first event yet -- Firebase needs a tick to restore
+  // any persisted session. Reading `.value` there raced that restore and
+  // read "signed out" even for an already-logged-in user. `.future` awaits
+  // the stream's first real emission instead of guessing at a snapshot.
+  final firebaseUser = await ref.watch(firebaseUserProvider.future);
   if (firebaseUser == null) return null;
   final repo = ref.watch(authRepositoryProvider);
   return repo.syncProfile();
