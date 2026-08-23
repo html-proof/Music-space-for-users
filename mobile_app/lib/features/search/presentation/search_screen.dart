@@ -30,11 +30,33 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   void initState() {
     super.initState();
     _loadRecent();
+    _syncRecentFromBackend();
   }
 
   Future<void> _loadRecent() async {
     final recent = await LocalDatabase.instance.recentSearches();
     if (mounted) setState(() => _recent = recent);
+  }
+
+  /// Backfills the local recent-searches cache from the server -- on a fresh
+  /// install/reinstall the local sqlite table is empty even though the
+  /// backend has the user's real history (see /api/search/history), so
+  /// without this a reinstalled user would see no recent searches at all
+  /// until they searched again. Local storage renders first for speed;
+  /// this reconciles it with the backend, the actual source of truth.
+  Future<void> _syncRecentFromBackend() async {
+    try {
+      final remote = await ref.read(searchRepositoryProvider).getHistory();
+      // Oldest first: addRecentSearch stamps "now" on insert, so inserting
+      // in this order leaves the most recent server entry sorting first
+      // locally too.
+      for (final query in remote.reversed) {
+        await LocalDatabase.instance.addRecentSearch(query);
+      }
+      await _loadRecent();
+    } catch (_) {
+      // Best-effort background sync -- the local cache already rendered.
+    }
   }
 
   void _onChanged(String value) {
