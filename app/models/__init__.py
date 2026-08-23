@@ -9,6 +9,7 @@ from app.models.recommendation import UserBehaviorProfile, RecommendationSignal
 from app.models.ml import MLModel
 from app.models.lyrics import Lyrics
 from app.models.download import Download
+from app.models.onboarding import OnboardingState
 
 __all__ = [
     "Base",
@@ -34,4 +35,5 @@ __all__ = [
     "MLModel",
     "Lyrics",
     "Download",
+    "OnboardingState",
 ]

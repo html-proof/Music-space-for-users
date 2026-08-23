@@ -12,6 +12,7 @@ from app.api.stats import router as stats_router
 from app.api.ml import router as ml_router
 from app.api.lyrics import router as lyrics_router
 from app.api.downloads import router as downloads_router
+from app.api.onboarding import router as onboarding_router
 
 __all__ = [
     "auth_router",
@@ -28,4 +29,5 @@ __all__ = [
     "ml_router",
     "lyrics_router",
     "downloads_router",
+    "onboarding_router",
 ]
