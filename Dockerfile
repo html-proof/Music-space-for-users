@@ -1,15 +1,27 @@
-FROM python:alpine
+FROM python:3.11-slim
 
-WORKDIR /GaanaPy
+WORKDIR /app
 
-COPY api api/
-COPY app.py app.py
-COPY requirements.txt requirements.txt
+# Install build dependencies for crypto and network libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY api/ api/
+COPY app/ app/
+COPY app.py .
 
 EXPOSE 8000
 
-RUN apk add g++ make libffi-dev openssl-dev --no-cache
+ENV HOST=0.0.0.0
+ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 
-RUN pip3 install -r requirements.txt
-
-CMD ["python", "-m", "uvicorn", "app:app" , "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

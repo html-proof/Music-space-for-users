@@ -1,155 +1,293 @@
-# GaanaPy
+# Production-Ready Spotify-like Music App Backend
 
-An unofficial JSON API for [Gaana](https://gaana.com), an Indian music streaming service. Built with FastAPI.
+A production-grade, asynchronous backend for a Spotify-like music application built with **FastAPI**, **Firebase Authentication**, **Supabase PostgreSQL (Async SQLAlchemy)**, **Redis (Caching & Pub/Sub)**, **WebSockets (Multi-device playback synchronization)**, an intelligent **Recommendation Engine**, and an integrated **Gaana audio streaming & AES decryption catalog**.
 
-## Usage
+---
 
-Start the server (see [Local Development](#local-development)), then open the interactive docs:
+## 1. Architecture Overview
 
-http://127.0.0.1:8000/docs
+```mermaid
+flowchart TD
+    Client[Client / Flutter Mobile / Next.js Web] -->|HTTPS Requests + Bearer Token| FastAPI[FastAPI App - app/main.py]
+    Client <-->|WebSockets: /ws/player/{device_id}| WSServer[WebSocket Connection Manager]
 
-### Endpoints
+    subgraph "Authentication & Security"
+        FastAPI --> AuthMiddleware[Firebase Auth Middleware]
+        AuthMiddleware --> FirebaseAdmin[Firebase Admin SDK - verify_id_token]
+    end
 
-All endpoints return JSON. List endpoints accept an optional `limit` (1–100, default 10). Artist tracks also accepts `page` (1–1000, default 1).
+    subgraph "Application Core & Services"
+        FastAPI --> AuthService[Auth Service]
+        FastAPI --> UserService[User & Analytics Service]
+        FastAPI --> DeviceService[Device & Session Manager]
+        FastAPI --> PlaybackService[Playback & Player Service]
+        FastAPI --> HistoryService[Listening & Search History Service]
+        FastAPI --> LibraryService[Library: Likes / Saved / Follows]
+        FastAPI --> PlaylistService[Playlist & Reorder Service]
+        FastAPI --> RecService[Recommendation Engine]
+        FastAPI --> CatalogService[GaanaPy Catalog & Stream Decryption]
+    end
 
-| Endpoint | Description | Required |
-|---|---|---|
-| `GET /songs/search?query=` | Search songs | `query` |
-| `GET /songs/info?seokey=` | Song details | `seokey` |
-| `GET /albums/search?query=` | Search albums | `query` |
-| `GET /albums/similar/?album_id=` | Similar albums | `album_id` (numeric) |
-| `GET /albums/info?seokey=` | Album details (includes tracks) | `seokey` |
-| `GET /artists/search?query=` | Search artists | `query` |
-| `GET /artists/tracks/?artist_id=` | Tracks by an artist | `artist_id` (numeric) |
-| `GET /artists/info?seokey=` | Artist details (with top tracks) | `seokey` |
-| `GET /artists/similar?artist_id=` | Similar artists | `artist_id` |
-| `GET /trending?language=` | Trending tracks | `language` |
-| `GET /newreleases?language=` | New releases | `language` |
-| `GET /charts` | Top chart playlists | — |
-| `GET /playlists/info?seokey=` | Playlist details (with tracks) | `seokey` |
-| `GET /health` | Health check | — |
-
-### Language
-
-`English`, `Hindi`, `Punjabi`, `Tamil`, `Telugu` etc. Case-sensitive.
-
-### Finding a seokey
-
-A **seokey** is the URL-friendly identifier from a Gaana page:
-
-```
-https://gaana.com/song/tyler-herro        → tyler-herro
-https://gaana.com/album/tyler-herro       → tyler-herro
-https://gaana.com/artist/jack-harlow      → jack-harlow
-https://gaana.com/playlist/gaana-dj-...   → gaana-dj-gaana-international-top-50
+    subgraph "Data & Realtime Layer"
+        AuthService & UserService & DeviceService & PlaybackService & HistoryService & LibraryService & PlaylistService --> SupabaseDB[(Supabase PostgreSQL / asyncpg)]
+        PlaybackService & WSServer <--> RedisPubSub[(Redis Cache & Pub/Sub)]
+        CatalogService --> GaanaAPI[(Gaana Live Audio Streams / AES-CBC)]
+    end
 ```
 
-Search results also return `seokey`, `artist_seokeys`, and `album_seokey`.
+---
 
-### Finding an artist ID
+## 2. Database Design & ER Diagram
 
-Artist IDs are numeric. Get them from search results:
+```mermaid
+erDiagram
+    users ||--o{ user_preferences : has
+    users ||--o{ devices : owns
+    users ||--o{ user_sessions : has
+    users ||--o{ playlists : creates
+    users ||--o| current_playback : tracks
+    users ||--o{ playback_events : logs
+    users ||--o{ listening_history : records
+    users ||--o{ search_history : logs
+    users ||--o{ liked_songs : likes
+    users ||--o{ saved_albums : saves
+    users ||--o{ followed_artists : follows
+    users ||--o| user_behavior_profiles : computes
 
+    playlists ||--o{ playlist_songs : contains
+    songs ||--o{ playlist_songs : included_in
+    artists ||--o{ songs : produces
+    albums ||--o{ songs : contains
+    artists ||--o{ albums : releases
+    songs ||--o{ liked_songs : liked_by
+    albums ||--o{ saved_albums : saved_by
+    artists ||--o{ followed_artists : followed_by
 ```
-GET /songs/search?query=tyler herro
-→ [{ "artist_ids": "817522", ... }]
-```
 
-### Examples
+---
 
-```sh
-curl "http://127.0.0.1:8000/songs/search?query=tyler+herro&limit=5"
-curl "http://127.0.0.1:8000/songs/info?seokey=tyler-herro"
-curl "http://127.0.0.1:8000/albums/info?seokey=tyler-herro"
-curl "http://127.0.0.1:8000/albums/similar/?album_id=3487503&limit=5"
-curl "http://127.0.0.1:8000/artists/info?seokey=jack-harlow&limit=5&page=1"
-curl "http://127.0.0.1:8000/artists/tracks/?artist_id=817522&limit=5&page=1"
-curl "http://127.0.0.1:8000/artists/similar?artist_id=817522"
-curl "http://127.0.0.1:8000/trending?language=English"
-curl "http://127.0.0.1:8000/newreleases?language=English"
-curl "http://127.0.0.1:8000/charts"
-curl "http://127.0.0.1:8000/playlists/info?seokey=gaana-dj-gaana-international-top-50"
-```
+## 3. Key Features
 
-Similar albums and artist tracks require numeric IDs. Results depend on Gaana's live catalog and the headers accepted by its current website endpoints.
+### 🔐 Firebase Authentication & Profile Synchronization
+- **Token Verification**: Validates Firebase Bearer ID tokens on every authenticated request via `firebase-admin`.
+- **Identity Isolation**: Firebase handles identity exclusively; passwords are never stored in PostgreSQL.
+- **Auto-Sync**: Automatically synchronizes user email, display name, and avatar, initializing preferences and playback states on first sign-in.
+- **Privacy Controls & GDPR**: Account deletion purges both PostgreSQL records and Firebase Auth users.
 
-### Discovery endpoints
+### 📱 Device Management & Remote Sessions
+- **Device Registry**: Tracks connected devices (`mobile`, `tablet`, `desktop`, `web`, `tv`), OS version, app version, and push tokens.
+- **Online Detection**: Real-time heartbeat endpoint (`POST /api/devices/{device_id}/heartbeat`).
+- **Remote Logout**: Ability to revoke remote sessions and remove individual devices.
 
-`GET /albums/similar/` requires a numeric Gaana `album_id` and returns normalized album records. The album must exist in Gaana's current catalog; otherwise the API returns a 404 no-results response.
+### 🎵 Playback & Multi-Device Real-Time Sync
+- **State Machine**: Understands `playing`, `paused`, `stopped`, and `buffering` states, track queues, shuffle, repeat, and volume.
+- **Telemetry Event Log**: Granular event ingestion (`PLAY`, `PAUSE`, `RESUME`, `SEEK`, `SKIP`, `NEXT`, `PREVIOUS`, `STOP`, `BUFFER_START`, `BUFFER_END`, `COMPLETE`).
+- **WebSocket Synchronization**: Real-time state broadcasting across all active devices on `/ws/player/{device_id}` backed by Redis Pub/Sub.
 
-`GET /artists/tracks/` requires a numeric `artist_id` and returns a paginated object containing `tracks` and `total`. Use `limit` for the number of tracks per page and `page` to select the page. Track records include the same metadata and `stream_urls` fields as `/songs/search/`.
+### 📊 Listening History & 30s/50% Rule
+- A track only counts as a meaningful listen if **`duration >= 30 seconds`** OR **`completion >= 50%`**.
+- Casual skips and partial listens are cataloged separately without skewing recommendation affinity.
 
-These endpoints depend on Gaana's live catalog and current website request headers, so results may change or be unavailable for individual IDs.
+### 🧠 Recommendation Engine & Dynamic Mixes
+- **Multi-Factor Affinity Scoring Formula**:
+  $$\text{Score} = \text{ArtistAffinity} + \text{GenreAffinity} + \text{LanguageAffinity} + \text{MoodAffinity} + \text{ListenFreq} + \text{CompletionRate} + \text{LikeScore} - \text{SkipPenalty} - \text{RepetitionPenalty}$$
+- **Curated Home Mixes**:
+  - `Made For You`
+  - `Recently Played`
+  - `Because You Listened To <Favorite Artist>`
+  - `Your Daily Mix`
+  - `Discover Weekly`
+  - `Trending Now` & `New Releases`
+  - `Mood Mix` (Chill, Workout, Focus, Party, etc.)
+  - `Language Mix`
 
-### Example response
+### 🔓 Stream Decryption & Music Catalog
+- Integrated [Gaana](https://gaana.com) scraping and AES-CBC stream URL decryption engine.
+- Instant access to multi-bitrate master `.m3u8` streams (`16k`, `64k`, `128k`, `320k`).
 
+---
+
+## 4. API Endpoints Reference
+
+All responses follow the unified response structure:
 ```json
-[
-  {
-    "seokey": "tyler-herro",
-    "title": "Tyler Herro",
-    "artists": "Jack Harlow",
-    "artist_seokeys": "jack-harlow",
-    "artist_ids": "817522",
-    "album": "Tyler Herro",
-    "album_id": "3487503",
-    "duration": "156",
-    "language": "English",
-    "genres": "Hip Hop",
-    "is_explicit": true,
-    "images": {
-      "urls": {
-        "large_artwork": "https://.../size_l.jpg",
-        "medium_artwork": "https://.../size_m.jpg",
-        "small_artwork": "https://.../size_s.jpg"
-      }
-    },
-    "stream_urls": {
-      "urls": {
-        "very_high_quality": "https://.../320.mp4.master.m3u8?...",
-        "high_quality": "https://.../128.mp4.master.m3u8?...",
-        "medium_quality": "https://.../64.mp4.master.m3u8?...",
-        "low_quality": "https://.../16.mp4.master.m3u8?..."
-      }
-    }
-  }
-]
+{
+  "success": true,
+  "data": { ... },
+  "error": null,
+  "timestamp": "2026-08-23T10:00:00Z"
+}
 ```
 
-## Local Development
+### Authentication (`/api/auth`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/auth/me` | Get authenticated user profile |
+| `POST` | `/api/auth/sync` | Sync profile metadata from Firebase |
+| `DELETE` | `/api/auth/account` | Permanently delete account and data |
 
-```sh
+### Users & Preferences (`/api/users`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/users/preferences` | Retrieve user preferences |
+| `PATCH` | `/api/users/preferences` | Update audio quality, crossfade, languages, explicit filters |
+| `GET` | `/api/users/analytics` | Retrieve listening behavior and top analytics |
+
+### Devices (`/api/devices`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/devices` | List all registered devices |
+| `POST` | `/api/devices/register` | Register/update a device and create session |
+| `POST` | `/api/devices/{device_id}/heartbeat` | Send online status heartbeat |
+| `DELETE` | `/api/devices/{device_id}` | Remote logout/remove device |
+
+### Player & Playback (`/api/player`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/player/current` | Get active playback state |
+| `POST` | `/api/player/play` | Start track playback |
+| `POST` | `/api/player/pause` | Pause track playback |
+| `POST` | `/api/player/resume` | Resume playback |
+| `POST` | `/api/player/seek` | Seek to position |
+| `POST` | `/api/player/next` | Skip to next track in queue |
+| `POST` | `/api/player/previous` | Return to start / previous track |
+| `POST` | `/api/player/stop` | Stop playback |
+| `POST` | `/api/player/sync` | Synchronize state across devices |
+| `POST` | `/api/player/events` | Ingest playback telemetry events |
+
+### Library & Favorites (`/api/library` & `/api/songs`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/songs/{song_id}/like` | Like a song |
+| `DELETE` | `/api/songs/{song_id}/like` | Unlike a song |
+| `GET` | `/api/library/liked` | Get liked songs collection |
+| `POST` | `/api/albums/{album_id}/save` | Save album to library |
+| `DELETE` | `/api/albums/{album_id}/save` | Unsave album |
+| `GET` | `/api/library/albums` | Get saved albums |
+| `POST` | `/api/artists/{artist_id}/follow` | Follow artist |
+| `DELETE` | `/api/artists/{artist_id}/follow` | Unfollow artist |
+| `GET` | `/api/library/artists` | Get followed artists |
+
+### Playlists (`/api/playlists`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/playlists` | List user's playlists |
+| `POST` | `/api/playlists` | Create new playlist |
+| `GET` | `/api/playlists/{playlist_id}` | Get playlist details and tracklist |
+| `PATCH` | `/api/playlists/{playlist_id}` | Update playlist title/description |
+| `DELETE` | `/api/playlists/{playlist_id}` | Delete playlist |
+| `POST` | `/api/playlists/{playlist_id}/songs` | Add song to playlist |
+| `DELETE` | `/api/playlists/{playlist_id}/songs/{song_id}` | Remove song from playlist |
+| `PATCH` | `/api/playlists/{playlist_id}/reorder` | Transactionally reorder playlist tracks |
+
+### Recommendations (`/api/recommendations`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/recommendations/home` | Personalized home feed with dynamic mixes |
+| `GET` | `/api/recommendations/similar-song/{song_id}` | Similar tracks based on artist & genre |
+| `GET` | `/api/recommendations/similar-artist/{artist_id}` | Similar artists |
+| `GET` | `/api/recommendations/mood/{mood}` | Mood-tailored playlist (Chill, Workout, etc.) |
+
+### Search & History (`/api/search` & `/api/history`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/search` | Search songs, albums, and artists |
+| `GET` | `/api/search/history` | Get recent search queries |
+| `DELETE` | `/api/search/history` | Clear search query history |
+| `GET` | `/api/history` | Paginated listening history |
+| `GET` | `/api/history/recent` | Recent listens |
+| `DELETE` | `/api/history` | Clear listening history |
+
+### WebSockets (`/ws/player/{device_id}`)
+Connect via `ws://localhost:8000/ws/player/{device_id}?token={firebase_id_token}` to receive real-time player updates and dispatch playback actions.
+
+---
+
+## 5. Local Setup & Development
+
+### Prerequisites
+- Python 3.10+
+- (Optional) Docker & Docker Compose
+
+### Step 1: Clone and Configure
+```bash
 git clone https://github.com/ZingyTomato/GaanaPy
 cd GaanaPy
 
-python3 -m venv .venv
+cp .env.example .env
+```
+
+### Step 2: Virtual Environment & Dependencies
+```bash
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+# On Linux/macOS:
 source .venv/bin/activate
+
 pip install -r requirements.txt
-
-python3 -m uvicorn app:app --reload
 ```
 
-Open http://127.0.0.1:8000/docs.
+### Step 3: Run FastAPI Server
+```bash
+python -m uvicorn app.main:app --reload --port 8000
+```
+- Interactive Swagger API documentation: 👉 **`http://127.0.0.1:8000/docs`**
+- Redoc API documentation: 👉 **`http://127.0.0.1:8000/redoc`**
 
-### Tests
+---
 
-```sh
-pip install pytest pytest-asyncio
-python3 -m pytest tests/ -v
+## 6. Docker & Docker Compose Deployment
+
+Run the complete multi-service stack (FastAPI Backend + PostgreSQL + Redis):
+
+```bash
+docker-compose up --build -d
 ```
 
-## Docker
-
-```yaml
-services:
-  gaanapy:
-    image: zingytomato/gaanapy:main
-    container_name: gaanapy
-    ports:
-      - "8000:8000"
-    restart: unless-stopped
+Check status:
+```bash
+docker-compose ps
 ```
 
-## Contributing
+---
 
-Open an issue for bugs or suggestions.
+## 7. Running the Automated Test Suite
+
+The test suite contains **73 comprehensive tests** covering authentication, device management, player transitions, listening thresholds, library management, playlist reordering, recommendation scoring, and WebSockets:
+
+```bash
+python -m pytest -v
+```
+
+---
+
+## 8. Render Deployment Guide 🚀
+
+### Method A: One-Click Blueprint (`render.yaml`)
+1. Push this repository to GitHub or GitLab.
+2. Log into [Render](https://dashboard.render.com).
+3. Click **New +** ➔ **Blueprint**.
+4. Connect this repository — Render will automatically detect [`render.yaml`](file:///c:/Users/Seban/Videos/GaanaPy/render.yaml) and configure the service.
+5. In the Render Dashboard environment settings, supply:
+   - `DATABASE_URL`: `postgresql+asyncpg://postgres:[PASSWORD]@[HOST]:5432/postgres` (from Supabase)
+   - `FIREBASE_PRIVATE_KEY`: Your Firebase service account private key string
+
+### Method B: Manual Web Service Setup on Render
+1. Click **New +** ➔ **Web Service**.
+2. Connect your GitHub repository.
+3. Configure settings:
+   - **Environment**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Health Check Path**: `/health`
+4. Add Environment Variables:
+   - `DATABASE_URL`: `postgresql+asyncpg://postgres:[PASSWORD]@[HOST]:5432/postgres`
+   - `FIREBASE_PROJECT_ID`: `personal-songs`
+   - `FIREBASE_CLIENT_EMAIL`: `firebase-adminsdk-fbsvc@personal-songs.iam.gserviceaccount.com`
+   - `FIREBASE_PRIVATE_KEY`: `-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n`
+   - `APP_ENV`: `production`
+   - `DEBUG`: `False`
+5. Click **Create Web Service** to trigger automatic deployment.
+
+   - Build using the provided [Dockerfile](file:///c:/Users/Seban/Videos/GaanaPy/Dockerfile).

@@ -1,0 +1,36 @@
+services:
+  # FastAPI Web Service
+  - type: web
+    name: gaanapy-spotify-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: APP_NAME
+        value: SpotifyCloneBackend
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        value: postgresql+asyncpg://postgres:xkF4otL3JuFpCSxg@db.snpvgzitwbdjiioaqozc.supabase.co:5432/postgres
+      - key: FIREBASE_PROJECT_ID
+        value: personal-songs
+      - key: FIREBASE_CLIENT_EMAIL
+        value: firebase-adminsdk-fbsvc@personal-songs.iam.gserviceaccount.com
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false # Paste the Firebase private key in Render Dashboard
+      - key: FIREBASE_EMULATOR_ENABLED
+        value: "False"
+      - key: REDIS_ENABLED
+        value: "True"
+      - key: REDIS_URL
+        value: rediss://default:gQAAAAAAAUq9AAIgcDIzMTNjMDhkNjgwODg0Y2MxOWIxZjBhYTQwODEyZTJmNw@model-dog-84669.upstash.io:6379
+      - key: MIN_LISTEN_SECONDS
+        value: "30"
+      - key: MIN_COMPLETION_PERCENTAGE
+        value: "50"

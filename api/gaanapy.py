@@ -14,12 +14,32 @@ from api.discovery.discovery import Discovery
 
 class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, Discovery):
     def __init__(self):
-        self.aiohttp = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
-        )
+        self._aiohttp = None
         self.api_endpoints = endpoints
         self.functions = Functions()
         self.errors = Errors()
+
+    @property
+    def aiohttp(self):
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        if (
+            self._aiohttp is None
+            or self._aiohttp.closed
+            or (current_loop and getattr(self._aiohttp, '_loop', None) != current_loop)
+        ):
+            self._aiohttp = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+        return self._aiohttp
+
+    @aiohttp.setter
+    def aiohttp(self, value):
+        self._aiohttp = value
 
     async def _safe_request(self, method: str, url: str, **kwargs) -> dict:
         try:
