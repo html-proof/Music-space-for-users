@@ -153,7 +153,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # Health Check
-@app.get("/health", tags=["System"])
+# GET and HEAD: Render's port-detection/health probes send HEAD requests,
+# which a GET-only route answers with 405 -- harmless, but it fills the
+# deploy log with noise on every probe.
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["System"])
 async def health_check():
     return api_response({
         "status": "healthy",
@@ -168,7 +171,7 @@ async def health_check():
     })
 
 
-@app.get("/", tags=["System"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["System"])
 async def root():
     return api_response({
         "name": settings.APP_NAME,

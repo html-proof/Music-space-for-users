@@ -161,6 +161,15 @@ async def test_health_check_is_exempt_from_rate_limit(client: AsyncClient, monke
         assert (await client.get("/health")).status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_root_and_health_accept_head_requests(client: AsyncClient):
+    """Render's port-detection/health probes send HEAD, not GET -- a
+    GET-only route answers with 405 and fills the deploy log with noise on
+    every probe."""
+    assert (await client.head("/")).status_code == 200
+    assert (await client.head("/health")).status_code == 200
+
+
 # --------------------------------------------------------------------------
 # Analytics profile shape
 # --------------------------------------------------------------------------
