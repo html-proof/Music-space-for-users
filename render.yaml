@@ -57,3 +57,9 @@ services:
       # it, since it talks to the database directly rather than over HTTP.
       - key: ML_ADMIN_TOKEN
         sync: false
+      # The free plan has no cron job facility to run scripts/train_ml.py on a
+      # schedule, so the ranker retrains itself on a background loop inside this
+      # process instead -- it skips passes with too little new data (see
+      # app/workers/ml_trainer.py), so this is safe to leave on permanently.
+      - key: ML_AUTO_TRAIN_ENABLED
+        value: "True"
