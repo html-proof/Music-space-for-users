@@ -43,12 +43,12 @@ class _LanguageSelectionScreenState extends ConsumerState<LanguageSelectionScree
               value: languages,
               onRetry: () => ref.invalidate(onboardingLanguagesProvider),
               data: (options) {
-                // Default to English once the catalog has loaded, rather than
-                // assuming it exists before the fetch confirms it.
-                if (_selected.isEmpty) {
-                  final english = options.where((o) => o.name == 'English');
-                  if (english.isNotEmpty) _selected.add(english.first.name);
-                }
+                // No client-side default selection -- the backend's language
+                // list carries no notion of a "preferred" entry, so picking
+                // one for the user (even just to pre-check a box) would be
+                // exactly the kind of preset content this screen exists to
+                // avoid. The user chooses; Continue stays disabled until they
+                // do.
                 return ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   itemCount: options.length,

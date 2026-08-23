@@ -68,10 +68,17 @@ class AuthService:
         db.add(user)
         await db.flush()
 
-        # Create default preferences
+        # Create default preferences. preferred_languages/favorite_artists
+        # start empty rather than guessing -- the onboarding language/artist
+        # screens are what actually populate these from the user's own
+        # choice; a real value here is one they picked, never a preset the
+        # signup path invented on their behalf (the various content queries
+        # that read an empty preferred_languages already fall back to a
+        # transient English/Hindi default for that one request, without ever
+        # persisting it as if it were a stated preference).
         preferences = UserPreferences(
             user_id=user.id,
-            preferred_languages=[language, "Hindi"] if language != "Hindi" else ["Hindi", "English"],
+            preferred_languages=[],
             favorite_artists=[],
             favorite_genres=[],
             favorite_moods=[],

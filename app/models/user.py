@@ -127,7 +127,7 @@ class UserPreferences(Base, TimestampMixin):
     )
     preferred_languages: Mapped[list] = mapped_column(
         UniversalJSON(),
-        default=lambda: ["English", "Hindi"],
+        default=list,
         nullable=False
     )
     favorite_artists: Mapped[list] = mapped_column(
