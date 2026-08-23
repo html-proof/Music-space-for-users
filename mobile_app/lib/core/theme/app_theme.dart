@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 
-/// Deliberately not Spotify green -- an indigo/violet accent on near-black,
-/// per the "modern dark music-app interface, not a clone" direction.
+/// A warm, editorial palette -- vivid orange as the primary accent, with a
+/// rotating set of color-blocked tile colors (teal/pink/navy/gold) for
+/// artwork placeholders, on a near-black background. Not Spotify green, and
+/// not a single flat accent either: closer to a bold color-blocked poster
+/// than a typical music-app UI.
 class AppColors {
   AppColors._();
 
-  static const accent = Color(0xFF7C6CF5);
-  static const accentMuted = Color(0xFF4A3F91);
+  static const accent = Color(0xFFFF7A3D);
+  static const accentMuted = Color(0xFFB8541F);
   static const background = Color(0xFF0B0B12);
   static const surface = Color(0xFF16161F);
   static const surfaceRaised = Color(0xFF1F1F2C);
@@ -14,6 +17,22 @@ class AppColors {
   static const textSecondary = Color(0xFFA0A0B2);
   static const success = Color(0xFF3ECF8E);
   static const error = Color(0xFFEF5B5B);
+
+  /// Rotating background colors for artwork tiles that have no real image
+  /// yet (see MediaCard) -- deliberately vivid, matching the color-blocked
+  /// playlist/artist tiles in the reference design rather than a flat gray box.
+  static const tileColors = [
+    Color(0xFFFF7A3D), // orange
+    Color(0xFF1FA98C), // teal
+    Color(0xFFFF6F91), // coral pink
+    Color(0xFF2C2F6B), // navy
+    Color(0xFFE8A33D), // gold
+  ];
+
+  /// A stable tile color for a given key (song/artist/album id or title),
+  /// so the same item always gets the same color across rebuilds/screens
+  /// rather than a random one on every frame.
+  static Color tileColorFor(String key) => tileColors[key.hashCode.abs() % tileColors.length];
 
   // Light-theme counterparts.
   static const backgroundLight = Color(0xFFFAFAFC);

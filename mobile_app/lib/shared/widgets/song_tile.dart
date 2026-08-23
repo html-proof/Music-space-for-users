@@ -43,15 +43,17 @@ class SongTile extends ConsumerWidget {
               height: 48,
               child: song.thumbnailUrl == null
                   ? Container(
-                      color: AppColors.surfaceRaised,
-                      child: const Icon(Icons.music_note, color: AppColors.textSecondary),
+                      color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                      alignment: Alignment.center,
+                      child: Icon(Icons.music_note, color: Colors.white.withValues(alpha: 0.85)),
                     )
                   : CachedNetworkImage(
                       imageUrl: song.thumbnailUrl!,
                       fit: BoxFit.cover,
                       errorWidget: (_, __, ___) => Container(
-                        color: AppColors.surfaceRaised,
-                        child: const Icon(Icons.music_note, color: AppColors.textSecondary),
+                        color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                        alignment: Alignment.center,
+                        child: Icon(Icons.music_note, color: Colors.white.withValues(alpha: 0.85)),
                       ),
                     ),
             ),

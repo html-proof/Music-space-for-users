@@ -50,13 +50,18 @@ class MiniPlayer extends ConsumerWidget {
                         width: 40,
                         height: 40,
                         child: song.thumbnailUrl == null
-                            ? Container(color: AppColors.surface, child: const Icon(Icons.music_note, size: 18))
+                            ? Container(
+                                color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                                alignment: Alignment.center,
+                                child: Icon(Icons.music_note, size: 18, color: Colors.white.withValues(alpha: 0.85)),
+                              )
                             : CachedNetworkImage(
                                 imageUrl: song.thumbnailUrl!,
                                 fit: BoxFit.cover,
                                 errorWidget: (_, __, ___) => Container(
-                                  color: AppColors.surface,
-                                  child: const Icon(Icons.music_note, size: 18, color: AppColors.textSecondary),
+                                  color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                                  alignment: Alignment.center,
+                                  child: Icon(Icons.music_note, size: 18, color: Colors.white.withValues(alpha: 0.85)),
                                 ),
                               ),
                       ),

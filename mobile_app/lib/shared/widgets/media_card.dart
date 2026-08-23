@@ -5,6 +5,11 @@ import '../../core/theme/app_theme.dart';
 
 /// A single artwork tile used in horizontal rails (home sections, search
 /// results grids). `circular` renders artist avatars.
+///
+/// Missing artwork falls back to a vivid, stable-per-item color block
+/// (AppColors.tileColorFor) rather than a flat gray box -- matches the
+/// color-blocked playlist/artist tile look the design leans on, and means a
+/// thin catalog never renders as a wall of identical gray squares.
 class MediaCard extends StatelessWidget {
   const MediaCard({
     super.key,
@@ -23,6 +28,18 @@ class MediaCard extends StatelessWidget {
   final bool circular;
   final double width;
 
+  Widget _fallback() {
+    return Container(
+      color: AppColors.tileColorFor(title),
+      alignment: Alignment.center,
+      child: Icon(
+        circular ? Icons.person : Icons.music_note,
+        color: Colors.white.withValues(alpha: 0.85),
+        size: 36,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final radius = circular ? BorderRadius.circular(width) : BorderRadius.circular(10);
@@ -39,24 +56,11 @@ class MediaCard extends StatelessWidget {
                 width: width,
                 height: width,
                 child: imageUrl == null
-                    ? Container(
-                        color: AppColors.surfaceRaised,
-                        child: Icon(
-                          circular ? Icons.person : Icons.music_note,
-                          color: AppColors.textSecondary,
-                          size: 36,
-                        ),
-                      )
+                    ? _fallback()
                     : CachedNetworkImage(
                         imageUrl: imageUrl!,
                         fit: BoxFit.cover,
-                        errorWidget: (_, __, ___) => Container(
-                          color: AppColors.surfaceRaised,
-                          child: Icon(
-                            circular ? Icons.person : Icons.music_note,
-                            color: AppColors.textSecondary,
-                          ),
-                        ),
+                        errorWidget: (_, __, ___) => _fallback(),
                       ),
               ),
             ),
@@ -65,7 +69,7 @@ class MediaCard extends StatelessWidget {
               title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
             ),
             if (subtitle != null)
               Text(

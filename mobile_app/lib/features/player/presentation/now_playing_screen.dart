@@ -46,16 +46,18 @@ class NowPlayingScreen extends ConsumerWidget {
                 borderRadius: BorderRadius.circular(16),
                 child: song.thumbnailUrl == null
                     ? Container(
-                        color: AppColors.surfaceRaised,
-                        child: const Icon(Icons.music_note, size: 64, color: AppColors.textSecondary),
+                        color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                        alignment: Alignment.center,
+                        child: Icon(Icons.music_note, size: 64, color: Colors.white.withValues(alpha: 0.85)),
                       )
                     : CachedNetworkImage(
                         imageUrl: song.thumbnailUrl!,
                         fit: BoxFit.cover,
                         width: double.infinity,
                         errorWidget: (_, __, ___) => Container(
-                          color: AppColors.surfaceRaised,
-                          child: const Icon(Icons.music_note, size: 64, color: AppColors.textSecondary),
+                          color: AppColors.tileColorFor(song.id.isEmpty ? song.title : song.id),
+                          alignment: Alignment.center,
+                          child: Icon(Icons.music_note, size: 64, color: Colors.white.withValues(alpha: 0.85)),
                         ),
                       ),
               ),
