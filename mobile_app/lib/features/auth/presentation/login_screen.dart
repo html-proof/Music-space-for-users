@@ -45,7 +45,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = 'Sign-in was cancelled or failed.');
+      // A bare "cancelled or failed" swallowed the real cause (most often a
+      // PlatformException from google_sign_in -- e.g. ApiException: 10,
+      // DEVELOPER_ERROR, which means the app's signing certificate's SHA-1
+      // isn't registered on the Firebase Android app). Surface it so it's
+      // actually diagnosable instead of guessing.
+      debugPrint('Google sign-in failed: $e');
+      setState(() => _error = 'Sign-in failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
