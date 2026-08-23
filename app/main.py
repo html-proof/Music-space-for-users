@@ -29,6 +29,7 @@ from app.api import (
     stats_router,
     ml_router,
     lyrics_router,
+    downloads_router,
 )
 
 logging.basicConfig(
@@ -180,6 +181,7 @@ app.include_router(catalog_router)
 app.include_router(stats_router)
 app.include_router(ml_router)
 app.include_router(lyrics_router)
+app.include_router(downloads_router)
 app.include_router(ws_router)
 
 

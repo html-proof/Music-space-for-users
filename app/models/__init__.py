@@ -8,6 +8,7 @@ from app.models.history import ListeningHistory, SearchHistory
 from app.models.recommendation import UserBehaviorProfile, RecommendationSignal
 from app.models.ml import MLModel
 from app.models.lyrics import Lyrics
+from app.models.download import Download
 
 __all__ = [
     "Base",
@@ -32,4 +33,5 @@ __all__ = [
     "RecommendationSignal",
     "MLModel",
     "Lyrics",
+    "Download",
 ]
