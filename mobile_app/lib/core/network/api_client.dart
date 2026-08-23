@@ -17,8 +17,14 @@ class ApiClient {
     _dio = Dio(
       BaseOptions(
         baseUrl: AppConfig.apiBaseUrl,
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 20),
+        // Generous on purpose: the deployed backend is a Render free-tier
+        // instance, which spins down on inactivity and cold-starts on the
+        // next request -- confirmed to take longer than the previous 15s
+        // connectTimeout, which is exactly what surfaced as a sign-in
+        // failure after an idle period. 45s comfortably covers a cold start;
+        // a warm instance still responds in a couple of seconds either way.
+        connectTimeout: const Duration(seconds: 45),
+        receiveTimeout: const Duration(seconds: 45),
         headers: {'Content-Type': 'application/json'},
       ),
     );

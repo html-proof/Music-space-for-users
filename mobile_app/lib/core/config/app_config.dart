@@ -3,15 +3,17 @@
 /// Override at build/run time with:
 ///   flutter run --dart-define=API_BASE_URL=https://your-backend.example.com
 ///
-/// Defaults to the Android emulator's loopback alias for a locally running
-/// `uvicorn app.main:app` (10.0.2.2 -> host machine's 127.0.0.1). iOS
-/// simulators and physical devices need an explicit override.
+/// Defaults to the deployed Render backend, which is what every real build
+/// (a release APK installed on an actual device, or any environment that
+/// isn't a local emulator pointed at a `uvicorn` process on the same dev
+/// machine) needs. Override to `http://10.0.2.2:8000` explicitly for that
+/// emulator-against-localhost workflow instead.
 class AppConfig {
   AppConfig._();
 
   static const String apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://10.0.2.2:8000',
+    defaultValue: 'https://music-space-for-users.onrender.com',
   );
 
   static const String appName = 'GaanaPy';

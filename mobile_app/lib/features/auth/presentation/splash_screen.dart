@@ -29,7 +29,10 @@ class SplashScreen extends ConsumerStatefulWidget {
 }
 
 class _SplashScreenState extends ConsumerState<SplashScreen> {
-  static const _resolveTimeout = Duration(seconds: 12);
+  // Matches ApiClient's connectTimeout: generous enough to cover a Render
+  // free-tier cold start (the backend spins down on inactivity), not just a
+  // warm response.
+  static const _resolveTimeout = Duration(seconds: 45);
 
   @override
   void initState() {

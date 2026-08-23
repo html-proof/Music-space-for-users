@@ -33,7 +33,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // state change; wait for it so we know onboarding status before
       // routing. Bounded so a dead/slow backend can't leave the button
       // spinning forever -- the catch below surfaces it as a normal error.
-      const timeout = Duration(seconds: 12);
+      // Matches ApiClient's connectTimeout: generous enough to cover a
+      // Render free-tier cold start, not just a warm response.
+      const timeout = Duration(seconds: 45);
       await ref.read(currentUserProvider.future).timeout(timeout);
       final status = await ref.read(onboardingStatusProvider.future).timeout(timeout);
       if (!mounted) return;
