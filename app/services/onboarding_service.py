@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import select
@@ -16,6 +17,46 @@ from app.services.user_service import UserService
 from app.utils.cache_keys import home_recommendations_key
 
 logger = logging.getLogger("onboarding_service")
+
+
+@dataclass
+class SuggestedArtist:
+    """An artist to show on the suggestions screen, not necessarily in our DB.
+
+    Most suggestions come straight from Gaana and are shown for browsing only
+    -- persisting all of them (and their songs/albums) just to fill a
+    30-artist grid is the write-amplification this type exists to avoid. Only
+    an artist the user actually selects gets written, in
+    `OnboardingService.set_artists`. Shaped like `app.models.song.Artist` so
+    `app/api/onboarding.py` can format either the same way.
+    """
+    id: str
+    name: str
+    image_url: Optional[str] = None
+    song_count: int = 0
+    album_count: int = 0
+    genres: list = field(default_factory=list)
+
+
+def _artist_stub_from_track(raw: dict) -> Optional[SuggestedArtist]:
+    """Build an unpersisted artist stub from one raw Gaana track dict.
+
+    Mirrors the first-artist extraction `catalog_service.get_or_create_artist`
+    normally does, but never touches the database -- this is for a grid the
+    user is just browsing, most of which they will never select.
+    """
+    name = (raw.get("artists") or raw.get("artist") or "").split(",")[0].strip()
+    if not name:
+        return None
+    seokeys = (raw.get("artist_seokeys") or "").split(",")
+    ext_ids = (raw.get("artist_ids") or "").split(",")
+    seokey = seokeys[0].strip() if seokeys and seokeys[0].strip() else None
+    ext_id = ext_ids[0].strip() if ext_ids and ext_ids[0].strip() else (seokey or name.lower().replace(" ", "-"))
+    return SuggestedArtist(
+        id=ext_id,
+        name=name,
+        image_url=raw.get("artist_image") or None,
+    )
 
 
 class OnboardingService:
@@ -48,7 +89,9 @@ class OnboardingService:
         return list((await db.execute(stmt)).scalars().all())
 
     @staticmethod
-    async def get_suggested_artists(db: AsyncSession, user_id: Optional[str] = None, limit: int = 30) -> List[Artist]:
+    async def get_suggested_artists(
+        db: AsyncSession, user_id: Optional[str] = None, limit: int = 30
+    ) -> List["Artist | SuggestedArtist"]:
         """Artists to show on the onboarding artist-selection screen.
 
         Backed by the real catalog (ranked by song_count) rather than a
@@ -60,8 +103,12 @@ class OnboardingService:
 
         On a freshly deployed, still-empty catalog this falls back to pulling
         trending songs for those languages (or English/Hindi if the user has
-        none saved yet) -- which upserts their artists as a side effect -- so
-        onboarding never has to show an empty screen.
+        none saved yet) purely to read their artist fields -- nothing is
+        written to the database here. There are far more artists on Gaana
+        than this screen will ever need to persist, and most of a 30-artist
+        grid is never selected, so writing all of them (plus their songs and
+        albums) on every fetch is pure waste. An artist is only ever
+        persisted once the user actually picks it, in `set_artists`.
         """
         preferred_languages: List[str] = []
         if user_id and is_uuid(user_id):
@@ -103,27 +150,15 @@ class OnboardingService:
             return artists[:limit]
 
         seen = {a.id for a in artists}
-        # Each upserted song costs several DB round trips (artist lookup-or-
-        # create, album lookup-or-create, the song itself), each its own
-        # commit -- on an empty/thin catalog every track is a miss, so this
-        # loop is bounded by wall-clock time, not just a per-call timeout,
-        # and stops the moment it has enough artists rather than always
-        # working through every track of every language. The budget is well
-        # under the client's request timeout so a slow pass still returns
-        # something instead of the client timing out first.
+        seen_names = {a.name.strip().lower() for a in artists if a.name}
+        # No DB writes in this loop at all -- just reading artist fields off
+        # the raw Gaana response -- so the only real cost per language is one
+        # network call, which is why this can stay tightly time-boxed.
         deadline = time.monotonic() + 12.0
+        stubs: List[SuggestedArtist] = []
         for language in fallback_languages:
-            if len(artists) >= limit or time.monotonic() >= deadline:
+            if len(artists) + len(stubs) >= limit or time.monotonic() >= deadline:
                 break
-            # Only the raw network call is inside wait_for, never a DB
-            # operation: catalog_service.get_trending mixes the Gaana fetch
-            # with upserts/commits on `db`, and asyncio.wait_for cancels
-            # whatever it's wrapping on timeout -- cancelling mid-commit can
-            # leave an AsyncSession unusable for the rest of the request.
-            # This is a "don't show an empty screen" nicety, not something
-            # worth blocking on or risking the session over, so it gets a
-            # tight budget and just skips the language on a miss (the search
-            # box in the UI is always available regardless).
             try:
                 raw = await asyncio.wait_for(catalog_service.gaana.get_trending(language, 20), timeout=4.0)
             except Exception:
@@ -132,17 +167,20 @@ class OnboardingService:
             if not isinstance(raw, list):
                 continue
             for item in raw:
-                if len(artists) >= limit or time.monotonic() >= deadline:
+                if len(artists) + len(stubs) >= limit:
                     break
-                if not (isinstance(item, dict) and "seokey" in item):
+                if not isinstance(item, dict):
                     continue
-                song = await catalog_service.upsert_gaana_song(db, item)
-                if song.artist_id and song.artist_id not in seen:
-                    artist = (await db.execute(select(Artist).where(Artist.id == song.artist_id))).scalar_one_or_none()
-                    if artist:
-                        artists.append(artist)
-                        seen.add(artist.id)
-        return artists[:limit]
+                stub = _artist_stub_from_track(item)
+                if not stub:
+                    continue
+                key = stub.name.strip().lower()
+                if stub.id in seen or key in seen_names:
+                    continue
+                seen.add(stub.id)
+                seen_names.add(key)
+                stubs.append(stub)
+        return (artists + stubs)[:limit]
 
     @staticmethod
     async def set_languages(db: AsyncSession, user_id: str, languages: List[str]) -> dict:
@@ -168,13 +206,39 @@ class OnboardingService:
         return await OnboardingService.get_status(db, user_id)
 
     @staticmethod
-    async def set_artists(db: AsyncSession, user_id: str, artist_ids: List[str]) -> dict:
-        valid_ids = [aid for aid in artist_ids if is_uuid(aid)]
+    async def set_artists(db: AsyncSession, user_id: str, artist_refs: List[dict]) -> dict:
+        """Persists only the artists the user actually picked.
+
+        `get_suggested_artists` deliberately never writes most of what it
+        shows on the grid; this is write-on-select instead -- a ref with a
+        real UUID (already in our DB) is looked up, anything else is a Gaana
+        stub upserted here for the first time, one batched commit for the
+        whole selection rather than one per artist.
+        """
         artists: List[Artist] = []
-        if valid_ids:
-            stmt = select(Artist).where(Artist.id.in_(valid_ids))
-            res = await db.execute(stmt)
-            artists = list(res.scalars().all())
+        seen_ids = set()
+        for ref in artist_refs:
+            raw_id = str((ref or {}).get("id") or "").strip()
+            if not raw_id or raw_id in seen_ids:
+                continue
+            if is_uuid(raw_id):
+                artist = (
+                    await db.execute(select(Artist).where(Artist.id == raw_id))
+                ).scalar_one_or_none()
+                if not artist:
+                    continue
+            else:
+                name = str(ref.get("name") or "").strip()
+                if not name:
+                    continue
+                artist = await catalog_service.get_or_create_artist(
+                    db, name=name, external_id=raw_id, image_url=ref.get("image_url"),
+                )
+            artists.append(artist)
+            seen_ids.add(raw_id)
+
+        if artists:
+            await db.commit()
 
         pref = await UserService.get_preferences(db, user_id)
         pref.favorite_artists = [a.name for a in artists]

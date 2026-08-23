@@ -53,8 +53,16 @@ class OnboardingRepository {
     return OnboardingStatus.fromJson(data as Map<String, dynamic>);
   }
 
-  Future<OnboardingStatus> setArtists(List<String> artistIds) async {
-    final data = await _api.post('/api/onboarding/artists', body: {'artist_ids': artistIds});
+  /// Most suggested artists are never persisted server-side (see
+  /// app/services/onboarding_service.py) -- only the ones the user actually
+  /// picks, so the full artist (not just an id) has to travel with the
+  /// selection for the backend to upsert it on the spot.
+  Future<OnboardingStatus> setArtists(List<Artist> artists) async {
+    final data = await _api.post('/api/onboarding/artists', body: {
+      'artists': artists
+          .map((a) => {'id': a.id, 'name': a.name, 'image_url': a.imageUrl})
+          .toList(),
+    });
     return OnboardingStatus.fromJson(data as Map<String, dynamic>);
   }
 

@@ -216,7 +216,9 @@ async def test_set_artists_updates_preferences_and_follows(
     a1, a2 = await seed_artists(db_session)
 
     res = await client.post(
-        "/api/onboarding/artists", json={"artist_ids": [a1.id, a2.id]}, headers=auth_headers
+        "/api/onboarding/artists",
+        json={"artists": [{"id": a1.id}, {"id": a2.id}]},
+        headers=auth_headers,
     )
     assert res.status_code == 200
     data = res.json()["data"]
@@ -232,7 +234,9 @@ async def test_set_artists_skips_unknown_ids(client: AsyncClient, auth_headers: 
     a1, _ = await seed_artists(db_session)
 
     res = await client.post(
-        "/api/onboarding/artists", json={"artist_ids": [a1.id, "not-a-real-id"]}, headers=auth_headers
+        "/api/onboarding/artists",
+        json={"artists": [{"id": a1.id}, {"id": "not-a-real-id"}]},
+        headers=auth_headers,
     )
     assert res.status_code == 200
     assert res.json()["data"]["favorite_artists"] == ["Daft Punk"]
@@ -244,7 +248,9 @@ async def test_complete_flow(client: AsyncClient, auth_headers: dict, db_session
     await seed_languages(db_session)
 
     await client.post("/api/onboarding/languages", json={"languages": ["English"]}, headers=auth_headers)
-    await client.post("/api/onboarding/artists", json={"artist_ids": [a1.id]}, headers=auth_headers)
+    await client.post(
+        "/api/onboarding/artists", json={"artists": [{"id": a1.id}]}, headers=auth_headers
+    )
 
     complete_res = await client.post("/api/onboarding/complete", headers=auth_headers)
     assert complete_res.status_code == 200

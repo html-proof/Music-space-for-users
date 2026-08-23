@@ -73,7 +73,9 @@ async def set_artists(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    status = await onboarding_service.set_artists(db, current_user.id, req.artist_ids)
+    status = await onboarding_service.set_artists(
+        db, current_user.id, [ref.model_dump() for ref in req.artists]
+    )
     return api_response(status)
 
 

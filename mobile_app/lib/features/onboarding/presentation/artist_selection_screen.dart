@@ -47,7 +47,7 @@ class _ArtistSelectionScreenState extends ConsumerState<ArtistSelectionScreen> {
     try {
       final repo = ref.read(onboardingRepositoryProvider);
       if (_selected.isNotEmpty) {
-        await repo.setArtists(_selected.keys.toList());
+        await repo.setArtists(_selected.values.toList());
       }
       await repo.complete();
       ref.invalidate(onboardingStatusProvider);
