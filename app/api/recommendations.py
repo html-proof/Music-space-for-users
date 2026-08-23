@@ -32,13 +32,19 @@ def _format_song(s) -> dict:
 @router.get("", summary="Get personalized recommendations home feed")
 @router.get("/home", summary="Get personalized recommendations home feed")
 async def get_home_recommendations(
+    refresh: bool = Query(
+        False,
+        description="Bypass the cached personalized ranking and recompute it now "
+                    "(the mobile client's pull-to-refresh sets this)."
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     recs = await RecommendationService.get_home_recommendations(
         db=db,
         user_id=current_user.id,
-        user_name=current_user.display_name or "Friend"
+        user_name=current_user.display_name or "Friend",
+        refresh=refresh,
     )
 
     data = {

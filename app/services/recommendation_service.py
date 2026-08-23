@@ -125,7 +125,8 @@ class RecommendationService:
     async def get_home_recommendations(
         db: AsyncSession,
         user_id: str,
-        user_name: str = "Friend"
+        user_name: str = "Friend",
+        refresh: bool = False,
     ) -> HomeRecommendationsResponse:
         """Personalized shelves are cached; catalog shelves (Trending, New
         Releases) are not.
@@ -139,9 +140,16 @@ class RecommendationService:
         chart that moved on Gaana could sit stale here for up to an hour
         after. They are now fetched fresh on every request, on both the
         cache-hit and cache-miss paths below.
+
+        `refresh=True` (the mobile client's pull-to-refresh) bypasses even the
+        personalized cache and recomputes against the database as it is right
+        now. Without this, invalidating only the client's local cache -- which
+        is all a naive pull-to-refresh does -- left the *server* still serving
+        an up-to-an-hour-old snapshot, so a refresh gesture visibly did
+        nothing: the exact "feed is static" symptom.
         """
         cache_key = home_recommendations_key(user_id)
-        cached = await cache_service.get_json(cache_key)
+        cached = None if refresh else await cache_service.get_json(cache_key)
         if cached:
             try:
                 response = HomeRecommendationsResponse.model_validate(cached)

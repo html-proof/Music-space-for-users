@@ -21,7 +21,7 @@ class HomeScreen extends ConsumerWidget {
     return Scaffold(
       body: SafeArea(
         child: RefreshIndicator(
-          onRefresh: () async => ref.invalidate(homeFeedProvider),
+          onRefresh: () => ref.read(homeFeedProvider.notifier).refresh(),
           child: AsyncValueView(
             value: feed,
             onRetry: () => ref.invalidate(homeFeedProvider),

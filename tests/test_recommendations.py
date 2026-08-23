@@ -44,6 +44,50 @@ async def test_recommendations_home_feed(client: AsyncClient, auth_headers: dict
 
 
 @pytest.mark.asyncio
+async def test_home_feed_refresh_bypasses_the_personalized_cache(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+):
+    """Pull-to-refresh must force a real recompute, not just re-serve
+    whatever the server already cached -- otherwise the gesture is a no-op
+    and the feed looks static even when the user asks it to update."""
+    from app.services.cache_service import cache_service
+    from app.utils.cache_keys import home_recommendations_key
+
+    songs = await seed_recommendation_catalog(db_session)
+    me_res = await client.get("/api/auth/me", headers=auth_headers)
+    user_id = me_res.json()["data"]["id"]
+    await LibraryService.like_song(db_session, user_id, songs[0].id)
+
+    # A recognizable stand-in for "whatever got cached earlier" -- planted
+    # directly so this test doesn't depend on the real ranking producing a
+    # specific order.
+    await cache_service.set_json(
+        home_recommendations_key(user_id),
+        {
+            "greeting": "stale",
+            "top_mix": [],
+            "categories": [{
+                "id": "made_for_you", "title": "Made For You", "description": "",
+                "category_type": "made_for_you", "items": [],
+            }],
+        },
+        ttl_seconds=3600,
+    )
+
+    normal = await client.get("/api/recommendations/home", headers=auth_headers)
+    assert normal.status_code == 200
+    made_for_you = next(c for c in normal.json()["data"]["categories"] if c["category_type"] == "made_for_you")
+    assert made_for_you["items"] == []  # served straight from the planted cache
+
+    refreshed = await client.get("/api/recommendations/home?refresh=true", headers=auth_headers)
+    assert refreshed.status_code == 200
+    made_for_you_refreshed = next(
+        c for c in refreshed.json()["data"]["categories"] if c["category_type"] == "made_for_you"
+    )
+    assert made_for_you_refreshed["items"] != []  # recomputed, not the stale cache
+
+
+@pytest.mark.asyncio
 async def test_home_feed_uses_preferred_language_for_a_brand_new_user(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession
 ):
