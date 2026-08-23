@@ -3,7 +3,8 @@
 /// Override at build/run time with:
 ///   flutter run --dart-define=API_BASE_URL=https://your-backend.example.com
 ///
-/// Defaults to the deployed Render backend, which is what every real build
+/// Defaults to the Cloudflare Worker proxy in front of the Render backend
+/// (see ../../../../cloudflare-worker/src/index.js) -- what every real build
 /// (a release APK installed on an actual device, or any environment that
 /// isn't a local emulator pointed at a `uvicorn` process on the same dev
 /// machine) needs. Override to `http://10.0.2.2:8000` explicitly for that
@@ -13,7 +14,7 @@ class AppConfig {
 
   static const String apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://music-space-for-users.onrender.com',
+    defaultValue: 'https://gaanapy-proxy.imeseban.workers.dev',
   );
 
   static const String appName = 'GaanaPy';
