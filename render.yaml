@@ -63,3 +63,10 @@ services:
       # app/workers/ml_trainer.py), so this is safe to leave on permanently.
       - key: ML_AUTO_TRAIN_ENABLED
         value: "True"
+      # Seeds real Gaana trending tracks across a broad language spread so
+      # onboarding's language list (derived from the songs catalog, never a
+      # seeded table) has real breadth quickly rather than only reflecting
+      # whatever the first few searches happened to touch. See
+      # app/workers/catalog_warmup.py.
+      - key: CATALOG_WARMUP_ENABLED
+        value: "True"

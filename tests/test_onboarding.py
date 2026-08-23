@@ -185,7 +185,11 @@ async def test_get_suggested_artists_falls_back_when_catalog_thin(
     async def fake_get_trending(language, limit):
         return [_raw_trending_track(language)]
 
+    async def fake_search_artists(name, limit):
+        return [{"name": name, "images": {"urls": {"large_artwork": f"https://img.example/{name}.jpg"}}}]
+
     monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "search_artists", fake_search_artists)
 
     res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
@@ -198,6 +202,33 @@ async def test_get_suggested_artists_falls_back_when_catalog_thin(
     # nothing valid to query Gaana with.
     by_name = {a["name"]: a for a in data}
     assert by_name["Fallback Artist English"]["seokey"] == "fallback-artist-english"
+    # The raw trending payload carries no artist_image -- this must be
+    # backfilled from a real Gaana artist search, not left as a placeholder.
+    assert by_name["Fallback Artist English"]["image_url"] == "https://img.example/Fallback Artist English.jpg"
+
+
+@pytest.mark.asyncio
+async def test_get_suggested_artists_image_backfill_is_bounded_and_fault_tolerant(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    """A failing/slow image lookup for one artist must not break the whole
+    suggestions response -- it just leaves that one artist without an image."""
+    from app.services.catalog_service import catalog_service
+
+    async def fake_get_trending(language, limit):
+        return [_raw_trending_track(language)]
+
+    async def failing_search_artists(name, limit):
+        raise RuntimeError("gaana artist search unreachable")
+
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "search_artists", failing_search_artists)
+
+    res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert len(data) >= 2
+    assert all(a["image_url"] is None for a in data)
 
 
 @pytest.mark.asyncio

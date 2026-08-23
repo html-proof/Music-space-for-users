@@ -199,7 +199,48 @@ class OnboardingService:
                 seen.add(stub.id)
                 seen_names.add(key)
                 stubs.append(stub)
+
+        if stubs:
+            await OnboardingService._backfill_stub_images(stubs)
+
         return (artists + stubs)[:limit]
+
+    # A trending track's own payload often omits `artist_image`; Gaana's
+    # artist search usually has one anyway. Bounded separately from the stub
+    # collection above (its own deadline, its own small per-lookup timeout,
+    # capped to a handful of artists) so filling in real images can never
+    # reintroduce the "onboarding takes forever" problem that same unbounded
+    # per-item network pattern caused before -- this is the same class of
+    # cost, deliberately kept an order of magnitude smaller.
+    IMAGE_BACKFILL_LIMIT = 12
+    IMAGE_BACKFILL_TIMEOUT_SECONDS = 1.5
+    IMAGE_BACKFILL_BUDGET_SECONDS = 8.0
+
+    @staticmethod
+    async def _backfill_stub_images(stubs: List["SuggestedArtist"]) -> None:
+        missing = [s for s in stubs if not s.image_url][:OnboardingService.IMAGE_BACKFILL_LIMIT]
+        if not missing:
+            return
+        deadline = time.monotonic() + OnboardingService.IMAGE_BACKFILL_BUDGET_SECONDS
+        for stub in missing:
+            if time.monotonic() >= deadline:
+                break
+            try:
+                results = await asyncio.wait_for(
+                    catalog_service.gaana.search_artists(stub.name, 1),
+                    timeout=OnboardingService.IMAGE_BACKFILL_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                continue
+            if not isinstance(results, list) or not results:
+                continue
+            raw = results[0]
+            if not isinstance(raw, dict):
+                continue
+            images = (raw.get("images") or {}).get("urls") or {}
+            image_url = images.get("large_artwork") or images.get("medium_artwork")
+            if image_url:
+                stub.image_url = str(image_url)
 
     @staticmethod
     async def set_languages(db: AsyncSession, user_id: str, languages: List[str]) -> dict:

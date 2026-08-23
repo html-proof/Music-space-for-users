@@ -200,6 +200,14 @@ class Settings(BaseSettings):
     # rather than compete with request handling in-process.
     RELEASE_WATCH_ENABLED: bool = False
     RELEASE_WATCH_INTERVAL_MINUTES: int = 180
+    # Seeds real Gaana trending tracks across a broad language spread so the
+    # onboarding language list (derived from `songs`, never a seeded table --
+    # see OnboardingService.get_languages) has real breadth quickly instead of
+    # only reflecting whatever the first few searches happened to touch. Same
+    # in-process-loop tradeoff as ML_AUTO_TRAIN_ENABLED: no cron on the free
+    # plan, so this runs in the web process; cheap since it skips any language
+    # that already has coverage.
+    CATALOG_WARMUP_ENABLED: bool = False
     # Fraction of each shelf given to unheard songs. Zero makes the feed
     # self-reinforcing: the ranker never sees evidence about songs it scores low.
     ML_EXPLORATION_RATE: float = 0.10
