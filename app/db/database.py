@@ -10,6 +10,10 @@ if settings.DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
 elif "postgres" in settings.DATABASE_URL:
     connect_args["ssl"] = "require"
+    # asyncpg waits indefinitely for a TCP/TLS handshake by default. Without a
+    # bound, an unreachable database host stalls startup and every request with
+    # no error to show for it.
+    connect_args["timeout"] = 15
 
 engine = create_async_engine(
     settings.DATABASE_URL,

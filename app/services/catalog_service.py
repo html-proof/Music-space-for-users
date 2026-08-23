@@ -158,6 +158,126 @@ class CatalogService:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 
+    async def search_albums(self, db: AsyncSession, query: str, limit: int = 10) -> List[Album]:
+        """
+        Albums matching `query`, upserted locally so later requests need no
+        upstream call. Falls back to a local title/artist match when Gaana is
+        unreachable, which is the same contract as `search_songs`.
+        """
+        cache_key = f"search:albums:{query}:{limit}"
+        cached = await cache_service.get_json(cache_key)
+        if cached:
+            stmt = select(Album).where(Album.id.in_(cached))
+            res = await db.execute(stmt)
+            return list(res.scalars().all())
+
+        results = await self.gaana.search_albums(query, limit)
+        if not isinstance(results, list):
+            return await self._local_albums(db, query, limit)
+
+        albums: List[Album] = []
+        for raw in results:
+            if isinstance(raw, dict) and raw.get("seokey"):
+                albums.append(await self._upsert_gaana_album(db, raw))
+
+        if not albums:
+            return await self._local_albums(db, query, limit)
+
+        # get_or_create_* only flush; commit so the rows outlive this request.
+        await db.commit()
+        await cache_service.set_json(cache_key, [a.id for a in albums], ttl_seconds=1800)
+        return albums
+
+    async def _local_albums(self, db: AsyncSession, query: str, limit: int) -> List[Album]:
+        stmt = select(Album).where(
+            or_(Album.title.ilike(f"%{query}%"), Album.artist_name.ilike(f"%{query}%"))
+        ).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def _upsert_gaana_album(self, db: AsyncSession, raw: Dict[str, Any]) -> Album:
+        images = (raw.get("images") or {}).get("urls") or {}
+        cover_url = images.get("large_artwork") or images.get("medium_artwork") or ""
+        artist_name = (raw.get("artists") or "").split(",")[0].strip()
+
+        artist = None
+        if artist_name:
+            artist = await self.get_or_create_artist(
+                db,
+                name=artist_name,
+                seokey=(raw.get("artist_seokeys") or "").split(",")[0].strip() or None,
+                external_id=(raw.get("artist_ids") or "").split(",")[0].strip() or None
+            )
+
+        # external_id keys off Gaana's album_id so an album found by search and
+        # one created while upserting a song resolve to the same row.
+        album = await self.get_or_create_album(
+            db,
+            title=raw.get("title") or "Unknown Album",
+            seokey=raw.get("seokey"),
+            external_id=raw.get("album_id"),
+            cover_url=cover_url,
+            artist_id=artist.id if artist else None,
+            artist_name=raw.get("artists") or ""
+        )
+
+        # Fields get_or_create_album does not set, and which a song-created row
+        # would have left empty.
+        album.cover_url = album.cover_url or cover_url
+        album.language = raw.get("language") or album.language
+        album.release_date = raw.get("release_date") or album.release_date
+        try:
+            track_count = int(raw.get("track_count") or 0)
+        except (ValueError, TypeError):
+            track_count = 0
+        album.track_count = track_count or album.track_count
+        return album
+
+    async def search_artists(self, db: AsyncSession, query: str, limit: int = 10) -> List[Artist]:
+        """Artists matching `query`, with the same upsert/fallback contract."""
+        cache_key = f"search:artists:{query}:{limit}"
+        cached = await cache_service.get_json(cache_key)
+        if cached:
+            stmt = select(Artist).where(Artist.id.in_(cached))
+            res = await db.execute(stmt)
+            return list(res.scalars().all())
+
+        results = await self.gaana.search_artists(query, limit)
+        if not isinstance(results, list):
+            return await self._local_artists(db, query, limit)
+
+        artists: List[Artist] = []
+        for raw in results:
+            if isinstance(raw, dict) and raw.get("name"):
+                images = (raw.get("images") or {}).get("urls") or {}
+                artist = await self.get_or_create_artist(
+                    db,
+                    name=raw["name"],
+                    seokey=raw.get("seokey"),
+                    external_id=raw.get("artist_id"),
+                    image_url=images.get("large_artwork") or images.get("medium_artwork") or ""
+                )
+                for field in ("song_count", "album_count"):
+                    try:
+                        value = int(raw.get(field) or 0)
+                    except (ValueError, TypeError):
+                        value = 0
+                    if value:
+                        setattr(artist, field, value)
+                artists.append(artist)
+
+        if not artists:
+            return await self._local_artists(db, query, limit)
+
+        await db.commit()
+        await cache_service.set_json(cache_key, [a.id for a in artists], ttl_seconds=1800)
+        return artists
+
+    async def _local_artists(self, db: AsyncSession, query: str, limit: int) -> List[Artist]:
+        stmt = select(Artist).where(Artist.name.ilike(f"%{query}%")).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
     async def get_song_by_id(self, db: AsyncSession, song_id: str) -> Optional[Song]:
         # song_id is either one of our own UUIDs or a Gaana seokey such as
         # "simtaangaran". Song.id is a native uuid on PostgreSQL, so only

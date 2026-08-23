@@ -72,6 +72,13 @@ class PlayerPubSub:
             try:
                 client = await cache_service.get_client()
                 if client is None:
+                    if cache_service.disabled_reason:
+                        logger.warning(
+                            "Redis credentials were rejected; stopping playback "
+                            "fan-out listener. Single-instance playback still "
+                            "works, but state will not sync across instances."
+                        )
+                        return
                     await asyncio.sleep(self._backoff(failures))
                     failures += 1
                     continue
@@ -94,6 +101,17 @@ class PlayerPubSub:
             except Exception as e:
                 if self._stopping:
                     break
+                # Let the cache service classify it: a rejected credential is a
+                # config error it latches on, and no amount of reconnecting can
+                # clear it, so the listener stops instead of retrying forever.
+                cache_service.note_failure(e, "pub/sub subscribe")
+                if cache_service.disabled_reason:
+                    logger.warning(
+                        "Stopping playback fan-out listener. Single-instance "
+                        "playback still works, but state will not sync across "
+                        "instances until the Redis credentials are fixed."
+                    )
+                    return
                 delay = self._backoff(failures)
                 message = str(e)
                 if message != last_error:

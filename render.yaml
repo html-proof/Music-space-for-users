@@ -32,6 +32,11 @@ services:
         value: "False"
       - key: REDIS_ENABLED
         value: "True"
+      # Paste the connection string from the Upstash console's "Redis" tab,
+      # unquoted and with no trailing whitespace -- the password is sent
+      # verbatim, so a stray character is rejected as an auth failure. Do not
+      # set UPSTASH_REDIS_REST_URL/TOKEN as a substitute: the REST token is a
+      # different credential and cannot authenticate a rediss:// connection.
       - key: REDIS_URL
         sync: false # rediss://... Upstash connection string
       # Explicit origin list. Leaving this as "*" disables credentialed
@@ -47,3 +52,8 @@ services:
         value: "30"
       - key: MIN_COMPLETION_PERCENTAGE
         value: "50"
+      # Shared secret for POST /api/ml/retrain and /api/ml/invalidate-cache.
+      # Leave unset to disable both endpoints; scripts/train_ml.py does not need
+      # it, since it talks to the database directly rather than over HTTP.
+      - key: ML_ADMIN_TOKEN
+        sync: false

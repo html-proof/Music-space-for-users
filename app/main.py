@@ -26,6 +26,8 @@ from app.api import (
     recommendations_router,
     search_router,
     catalog_router,
+    stats_router,
+    ml_router,
 )
 
 logging.basicConfig(
@@ -48,9 +50,22 @@ async def lifespan(app: FastAPI):
     await init_db()
     await cache_service.initialize()
     await player_pubsub.start()
+
+    # Retraining in-process is opt-in; the Render cron job is the default. The
+    # handle is kept so shutdown can cancel it -- an orphaned task holding a DB
+    # session would keep the pool from closing.
+    trainer_task = None
+    if settings.ML_ENABLED and settings.ML_AUTO_TRAIN_ENABLED:
+        import asyncio
+        from app.workers.ml_trainer import auto_train_loop
+
+        trainer_task = asyncio.create_task(auto_train_loop())
+
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
+    if trainer_task:
+        trainer_task.cancel()
     await player_pubsub.stop()
     await cache_service.close()
     await catalog_service.close()
@@ -131,7 +146,12 @@ async def health_check():
         "status": "healthy",
         "app": settings.APP_NAME,
         "env": settings.APP_ENV,
-        "redis_connected": cache_service.redis is not None
+        "redis_connected": cache_service.is_connected,
+        "redis_enabled": settings.REDIS_ENABLED,
+        # /health is unauthenticated, so the raw error text (a server-side
+        # detail) is only echoed when DEBUG is on; the flag is always safe.
+        "redis_credentials_rejected": cache_service.disabled_reason is not None,
+        "redis_error": cache_service.disabled_reason if settings.DEBUG else None,
     })
 
 
@@ -156,6 +176,8 @@ app.include_router(playlists_router)
 app.include_router(recommendations_router)
 app.include_router(search_router)
 app.include_router(catalog_router)
+app.include_router(stats_router)
+app.include_router(ml_router)
 app.include_router(ws_router)
 
 

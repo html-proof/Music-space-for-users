@@ -8,6 +8,7 @@ from app.db.base import Base
 from app.db.database import get_db
 from app.config.settings import settings
 from app.middleware.rate_limit import reset_rate_limits
+from app.services.cache_service import cache_service
 from app.main import app
 
 # Ensure tests use in-memory SQLite, isolated cache, and test mock tokens.
@@ -31,6 +32,18 @@ def clean_rate_limit_buckets():
     reset_rate_limits()
     yield
     reset_rate_limits()
+
+
+@pytest.fixture(autouse=True)
+def clean_cache():
+    """
+    With REDIS_ENABLED off, cache_service falls back to a dict on the singleton.
+    That dict outlives the per-test database, so cached ids (search results, an
+    active radio station) would leak into tests whose rows no longer exist.
+    """
+    cache_service._memory_cache.clear()
+    yield
+    cache_service._memory_cache.clear()
 
 
 @pytest_asyncio.fixture(scope="function")

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import is_uuid
 from app.models.song import LikedSong, SavedAlbum, FollowedArtist, Song, Album, Artist
 from app.services.cache_service import cache_service
+from app.services.signal_service import SignalService
 from app.utils.cache_keys import home_recommendations_key
 
 logger = logging.getLogger("library_service")
@@ -38,8 +39,28 @@ class LibraryService:
             db.add(liked)
             await db.commit()
             # Likes are weighted heavily by the recommender.
+            await LibraryService._signal_like(db, user_id, song_id, liked=True)
             await cache_service.delete(home_recommendations_key(user_id))
         return True
+
+    @staticmethod
+    async def _signal_like(db: AsyncSession, user_id: str, song_id: str, liked: bool) -> None:
+        """Fan a like/unlike out to the entity signal log.
+
+        The log is append-only, so an unlike is recorded as an equal negative
+        rather than by deleting the original row -- summing the log then gives the
+        current affinity. Failures are swallowed: the LikedSong row is the record
+        of truth and is already committed.
+        """
+        song = (await db.execute(select(Song).where(Song.id == song_id))).scalar_one_or_none()
+        if song is None:
+            return
+        if await SignalService.record_like(db, user_id, song, liked=liked):
+            try:
+                await db.commit()
+            except Exception:
+                logger.exception("failed to commit like signal for %s", user_id)
+                await db.rollback()
 
     @staticmethod
     async def unlike_song(db: AsyncSession, user_id: str, song_id: str) -> bool:
@@ -50,6 +71,7 @@ class LibraryService:
         stmt = delete(LikedSong).where(and_(LikedSong.user_id == user_id, LikedSong.song_id == song_id))
         await db.execute(stmt)
         await db.commit()
+        await LibraryService._signal_like(db, user_id, song_id, liked=False)
         await cache_service.delete(home_recommendations_key(user_id))
         return True
 
@@ -89,7 +111,26 @@ class LibraryService:
             )
             db.add(saved)
             await db.commit()
+            await LibraryService._commit_signals(
+                db, user_id, await SignalService.record_save_album(db, user_id, album_id)
+            )
         return True
+
+    @staticmethod
+    async def _commit_signals(db: AsyncSession, user_id: str, written: int) -> None:
+        """Commit signal rows written after their action already committed.
+
+        Failures are swallowed: the library row is the record of truth and is
+        durable by this point, so a signal-log problem must not surface as a
+        failed save or follow.
+        """
+        if not written:
+            return
+        try:
+            await db.commit()
+        except Exception:
+            logger.exception("failed to commit %d library signals for %s", written, user_id)
+            await db.rollback()
 
     @staticmethod
     async def unsave_album(db: AsyncSession, user_id: str, album_id: str) -> bool:
@@ -134,6 +175,16 @@ class LibraryService:
             )
             db.add(followed)
             await db.commit()
+            # The artist's name is recorded alongside the id: song rows carry a
+            # credit string, not an artist_id, so a name-keyed signal is what the
+            # feed can actually match against.
+            artist = (await db.execute(select(Artist).where(Artist.id == artist_id))).scalar_one_or_none()
+            await LibraryService._commit_signals(
+                db, user_id,
+                await SignalService.record_follow_artist(
+                    db, user_id, artist_id, artist_name=(artist.name if artist else "")
+                ),
+            )
         return True
 
     @staticmethod

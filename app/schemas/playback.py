@@ -1,11 +1,12 @@
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 from app.schemas.song import SongResponse
 from app.schemas.device import DeviceResponse
 
 PLAYBACK_STATES = ("playing", "paused", "stopped", "buffering")
 REPEAT_MODES = ("off", "all", "one")
+RADIO_SEED_TYPES = ("song", "artist", "mood", "personalized")
 PLAYBACK_EVENTS = (
     "PLAY", "PAUSE", "RESUME", "SEEK", "SKIP", "NEXT", "PREVIOUS",
     "STOP", "BUFFER_START", "BUFFER_END", "COMPLETE",
@@ -13,6 +14,7 @@ PLAYBACK_EVENTS = (
 
 _STATE_PATTERN = f"^({'|'.join(PLAYBACK_STATES)})$"
 _REPEAT_PATTERN = f"^({'|'.join(REPEAT_MODES)})$"
+_RADIO_SEED_PATTERN = f"^({'|'.join(RADIO_SEED_TYPES)})$"
 
 
 class PlayRequest(BaseModel):
@@ -51,6 +53,27 @@ class ShuffleRequest(BaseModel):
 class RepeatRequest(BaseModel):
     repeat_mode: str = Field(..., pattern=_REPEAT_PATTERN)
     device_id: Optional[str] = None
+
+
+class RadioStartRequest(BaseModel):
+    """Start an endless station. `personalized` is the only seedless type."""
+
+    seed_type: str = Field(
+        "personalized",
+        pattern=_RADIO_SEED_PATTERN,
+        description=", ".join(RADIO_SEED_TYPES),
+    )
+    seed_id: Optional[str] = Field(
+        None,
+        description="Song id/seokey, artist id/name, or mood name, per seed_type",
+    )
+    device_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def seed_id_required_unless_personalized(self) -> "RadioStartRequest":
+        if self.seed_type != "personalized" and not (self.seed_id or "").strip():
+            raise ValueError(f"seed_id is required when seed_type is {self.seed_type!r}")
+        return self
 
 
 class SyncPlaybackRequest(BaseModel):

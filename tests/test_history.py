@@ -62,9 +62,10 @@ async def test_listening_history_thresholds(client: AsyncClient, auth_headers: d
 
 @pytest.mark.asyncio
 async def test_search_history(client: AsyncClient, auth_headers: dict):
-    # Log searches
-    await client.get("/api/search?query=Daft+Punk", headers=auth_headers)
-    await client.get("/api/search?query=Weekend", headers=auth_headers)
+    # Log searches. type=track keeps this to the one upstream lookup the test
+    # needs; the point here is the history row, not the results.
+    await client.get("/api/search?query=Daft+Punk&type=track", headers=auth_headers)
+    await client.get("/api/search?query=Weekend&type=track", headers=auth_headers)
 
     # Retrieve search history
     res = await client.get("/api/search/history", headers=auth_headers)

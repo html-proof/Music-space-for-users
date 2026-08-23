@@ -6,6 +6,7 @@ from app.models.playlist import Playlist, PlaylistSong
 from app.models.playback import CurrentPlayback, PlaybackEvent
 from app.models.history import ListeningHistory, SearchHistory
 from app.models.recommendation import UserBehaviorProfile, RecommendationSignal
+from app.models.ml import MLModel
 
 __all__ = [
     "Base",
@@ -28,4 +29,5 @@ __all__ = [
     "SearchHistory",
     "UserBehaviorProfile",
     "RecommendationSignal",
+    "MLModel",
 ]

@@ -534,9 +534,31 @@ async def test_next_advances_and_persists_the_shrinking_queue(
     assert body["song_id"] == songs[2].id
     assert body["queue"] == []
 
-    # Queue exhausted: playback stops rather than repeating the last track.
+    # Queue exhausted: autoplay continues the session, but it must move to a
+    # different track -- repeating the last one was the original defect.
     third = await client.post("/api/player/next", headers=auth_headers)
-    assert third.json()["data"]["state"] == "stopped"
+    body = third.json()["data"]
+    assert body["state"] == "playing"
+    assert body["song_id"] != songs[2].id
+
+
+@pytest.mark.asyncio
+async def test_next_stops_when_there_is_nothing_left_to_autoplay(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+):
+    """Autoplay must not invent a track: one song in the catalogue means stop."""
+    songs = await seed_songs(db_session, 1)
+    await client.post(
+        "/api/player/play",
+        json={"song_id": songs[0].id, "device_id": "d1", "queue": []},
+        headers=auth_headers,
+    )
+
+    res = await client.post("/api/player/next", headers=auth_headers)
+    assert res.status_code == 200, res.text
+    body = res.json()["data"]
+    assert body["state"] == "stopped"
+    assert body["position_seconds"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -1030,3 +1052,130 @@ async def test_remove_non_uuid_song_from_playlist_does_not_500(
     # Nothing to remove, but it must be a clean response rather than a 500.
     assert res.status_code == 200, res.text
 
+
+
+# --- Redis credential / fallback handling -----------------------------------
+# Production logged "invalid username-password pair" on every cache call and on
+# a 5s pub/sub reconnect loop: a rejected credential was treated as a transient
+# fault forever, and the Upstash REST pair silently overrode a working
+# REDIS_URL.
+
+
+def test_explicit_redis_url_wins_over_upstash_rest_pair():
+    """
+    UPSTASH_REDIS_REST_TOKEN authenticates the HTTP REST API, so deriving a
+    rediss:// password from it can be rejected at AUTH. An explicitly set
+    REDIS_URL must not be overridden by it.
+    """
+    s = Settings(
+        REDIS_URL="rediss://default:real-resp-password@db.upstash.io:6379",
+        UPSTASH_REDIS_REST_URL="https://db.upstash.io",
+        UPSTASH_REDIS_REST_TOKEN="a-rest-api-token",
+    )
+    assert s.get_active_redis_url() == "rediss://default:real-resp-password@db.upstash.io:6379"
+    assert s.redis_url_source() == "REDIS_URL"
+
+
+def test_upstash_rest_pair_is_used_only_without_an_explicit_redis_url(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    s = Settings(
+        _env_file=None,
+        UPSTASH_REDIS_REST_URL="https://db.upstash.io",
+        UPSTASH_REDIS_REST_TOKEN="a-rest-api-token",
+    )
+    assert s.get_active_redis_url() == "rediss://default:a-rest-api-token@db.upstash.io:6379"
+    assert "derived" in s.redis_url_source()
+
+
+def test_placeholder_redis_password_is_named_before_it_causes_an_auth_error():
+    """
+    scripts/gen_render_env.py emits ROTATED_UPSTASH_TOKEN as a stand-in. Uploaded
+    as-is it only shows up as "invalid username-password pair", which reads like
+    a rotation problem rather than an unfinished env file.
+    """
+    s = Settings(
+        _env_file=None,
+        REDIS_URL="rediss://default:ROTATED_UPSTASH_TOKEN@model-dog-84669.upstash.io:6379",
+    )
+    assert s.redis_url_placeholder() == "ROTATED_UPSTASH_TOKEN"
+    assert Settings(
+        _env_file=None, REDIS_URL="rediss://default:a-real-secret@db.upstash.io:6379"
+    ).redis_url_placeholder() is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"rediss://default:pw@db.upstash.io:6379"',
+        "'rediss://default:pw@db.upstash.io:6379'",
+        "  rediss://default:pw@db.upstash.io:6379\n",
+    ],
+)
+def test_redis_url_quotes_and_whitespace_are_stripped(raw: str):
+    """
+    The password is sent verbatim, so a quote or newline picked up from a
+    dashboard paste comes back as an auth failure rather than a parse error.
+    """
+    assert Settings(REDIS_URL=raw).REDIS_URL == "rediss://default:pw@db.upstash.io:6379"
+
+
+def test_redact_url_never_echoes_the_password():
+    from app.config.settings import redact_url
+
+    redacted = redact_url("rediss://default:sup3r-s3cret@db.upstash.io:6379")
+    assert "sup3r-s3cret" not in redacted
+    assert redacted == "rediss://default:***@db.upstash.io:6379"
+    # A password-less URL stays readable, and no input may raise.
+    assert redact_url("redis://localhost:6379/0") == "redis://localhost:6379/0"
+    assert redact_url(None) == "<unset>"
+
+
+@pytest.mark.asyncio
+async def test_rejected_credentials_stop_redis_for_the_process(monkeypatch):
+    """
+    A bad password cannot succeed on retry. It must latch off, so cache calls
+    stop rebuilding a client (and stop paying the connect timeout) on every
+    request, and the in-memory fallback keeps serving.
+    """
+    import importlib
+
+    # app.services re-exports the cache_service *instance*, shadowing the
+    # submodule name, so reach the module through importlib.
+    cache_module = importlib.import_module("app.services.cache_service")
+    svc = cache_module.CacheService()
+    monkeypatch.setattr(settings, "REDIS_ENABLED", True)
+
+    created = []
+    monkeypatch.setattr(
+        cache_module.aioredis,
+        "from_url",
+        lambda *a, **kw: created.append(1) or object(),
+    )
+
+    svc.note_failure(Exception("invalid username-password pair"), "startup ping")
+
+    assert svc.disabled_reason is not None
+    assert svc.is_connected is False
+    assert await svc.get_client() is None
+    assert created == [], "no further connection may be attempted after a rejected credential"
+
+    await svc.set_json("k", {"v": 1}, ttl_seconds=60)
+    assert await svc.get_json("k") == {"v": 1}
+
+
+@pytest.mark.asyncio
+async def test_transient_redis_failure_is_retried_not_latched(monkeypatch):
+    """A refused connection is transient: it must cool down, not disable Redis."""
+    import importlib
+
+    cache_module = importlib.import_module("app.services.cache_service")
+    svc = cache_module.CacheService()
+    monkeypatch.setattr(settings, "REDIS_ENABLED", True)
+    monkeypatch.setattr(cache_module.aioredis, "from_url", lambda *a, **kw: object())
+
+    svc.note_failure(ConnectionError("Connection refused"), "get")
+    assert svc.disabled_reason is None
+    # Inside the cooldown nothing is dialed; once it lapses, reconnects resume.
+    assert await svc.get_client() is None
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: svc._retry_after + 1)
+    assert await svc.get_client() is not None

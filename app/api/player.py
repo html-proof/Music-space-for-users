@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.middleware.firebase_auth import get_current_user
 from app.models.user import User
-from app.schemas.playback import PlayRequest, PauseRequest, ResumeRequest, SeekRequest, SyncPlaybackRequest, PlaybackEventRequest
+from app.schemas.playback import PlayRequest, PauseRequest, ResumeRequest, SeekRequest, SyncPlaybackRequest, PlaybackEventRequest, RadioStartRequest
 from app.services.playback_service import PlaybackService
 from app.services.catalog_service import catalog_service
 from app.utils.response import api_response, api_error
@@ -67,6 +67,26 @@ async def play_song(
         return api_response(_format_playback_state(playback))
     except ValueError as e:
         return api_error("SONG_NOT_FOUND", str(e), status_code=404)
+
+
+@router.post("/radio", summary="Start an endless radio station")
+async def start_radio(
+    req: RadioStartRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Seeded by a song, artist or mood -- or by listening history when
+    `seed_type` is `personalized`. Playback continues past the returned queue:
+    once it empties, `/next` refills the station automatically.
+    """
+    try:
+        playback = await PlaybackService.start_radio(db, current_user.id, req)
+    except LookupError as e:
+        return api_error("SEED_NOT_FOUND", str(e), status_code=404)
+    except ValueError as e:
+        return api_error("RADIO_UNAVAILABLE", str(e), status_code=404)
+    return api_response(_format_playback_state(playback))
 
 
 @router.post("/pause", summary="Pause playback")

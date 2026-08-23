@@ -1,0 +1,365 @@
+"""
+Endless radio stations, and the autoplay that keeps a queue from dead-ending.
+
+Station state lives in the cache rather than a new database column: it is
+disposable session state, so it needs no schema migration, and Redis (unlike
+process memory) survives the free-tier web service spinning down after idle.
+With Redis disabled the station simply is not remembered between requests --
+batches are still generated, they just repeat themselves more often.
+
+Batches are built on demand inside the request. Nothing here needs a background
+worker or a cron job, neither of which exists on the free plan.
+"""
+import logging
+import random
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+
+from sqlalchemy import desc, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config.settings import settings
+from app.db.base import is_uuid
+from app.models.history import ListeningHistory
+from app.models.song import Artist, Song
+from app.services.cache_service import cache_service
+from app.services.catalog_service import catalog_service
+from app.services.recommendation_service import RecommendationService
+from app.utils.cache_keys import radio_station_key
+
+logger = logging.getLogger("radio_service")
+
+SEED_TYPES = ("song", "artist", "mood", "personalized")
+DEFAULT_BATCH_SIZE = 20
+STATION_TTL_SECONDS = 6 * 60 * 60
+# A station only remembers so many already-played tracks. Unbounded, the value
+# would grow for as long as the listener keeps skipping.
+MAX_SERVED_REMEMBERED = 200
+# How many recently heard tracks to keep out of a fresh batch.
+RECENT_HISTORY_WINDOW = 50
+
+
+class RadioService:
+    # ------------------------------------------------------------------ state
+
+    @staticmethod
+    async def get_station(user_id: str) -> Optional[Dict[str, Any]]:
+        station = await cache_service.get_json(radio_station_key(user_id))
+        if isinstance(station, dict) and station.get("seed_type") in SEED_TYPES:
+            return station
+        return None
+
+    @staticmethod
+    async def set_station(
+        user_id: str,
+        seed_type: str,
+        seed_id: Optional[str],
+        served: Sequence[str]
+    ) -> Dict[str, Any]:
+        # Keep the most recent ids: those are the ones worth not repeating.
+        trimmed = list(dict.fromkeys(str(s) for s in served if s))[-MAX_SERVED_REMEMBERED:]
+        station = {"seed_type": seed_type, "seed_id": seed_id, "served": trimmed}
+        await cache_service.set_json(
+            radio_station_key(user_id), station, ttl_seconds=STATION_TTL_SECONDS
+        )
+        return station
+
+    @staticmethod
+    async def clear_station(user_id: str) -> None:
+        await cache_service.delete(radio_station_key(user_id))
+
+    # ------------------------------------------------------------------ seeds
+
+    @staticmethod
+    async def resolve_seed(db: AsyncSession, seed_type: str, seed_id: Optional[str]) -> Optional[str]:
+        """
+        Normalise a client-supplied seed, or return None when it cannot be
+        resolved. Seed ids arrive straight from the request body, so they are
+        screened here instead of being bound to a uuid column, which would turn
+        an unknown seed into a 500.
+        """
+        if seed_type == "personalized":
+            return None
+
+        value = (seed_id or "").strip()
+        if not value:
+            return None
+        if seed_type == "mood":
+            return value
+        if seed_type == "song":
+            song = await catalog_service.get_song_by_id(db, value)
+            return song.id if song else None
+        if seed_type == "artist":
+            artist = await RadioService._find_artist(db, value)
+            if artist:
+                return artist.id
+            # No artist row, but the name may still be credited on songs -- that
+            # is how multi-artist credit strings arrive. _artist_songs matches on
+            # the name in that case, so the raw value is a usable seed.
+            res = await db.execute(
+                select(Song.id).where(Song.artist_name.ilike(f"%{value}%")).limit(1)
+            )
+            return value if res.scalars().first() else None
+        return None
+
+    @staticmethod
+    async def _find_artist(db: AsyncSession, value: str) -> Optional[Artist]:
+        conditions = [
+            Artist.external_id == value,
+            Artist.seokey == value,
+            Artist.name.ilike(value),
+        ]
+        # Artist.id is a native uuid on PostgreSQL; only compare when it parses.
+        if is_uuid(value):
+            conditions.append(Artist.id == value)
+        res = await db.execute(select(Artist).where(or_(*conditions)).limit(1))
+        return res.scalars().first()
+
+    # ---------------------------------------------------------------- batches
+
+    @staticmethod
+    async def build_batch(
+        db: AsyncSession,
+        user_id: str,
+        seed_type: str,
+        seed_id: Optional[str] = None,
+        exclude_ids: Optional[Iterable[str]] = None,
+        limit: int = DEFAULT_BATCH_SIZE,
+        allow_network: bool = False
+    ) -> List[Song]:
+        """
+        Next stretch of a station.
+
+        `allow_network` is for starting a station, where one upstream round trip
+        is acceptable. Autoplay refills leave it off so that pressing skip is
+        never waiting on Gaana.
+        """
+        if seed_type not in SEED_TYPES:
+            seed_type = "personalized"
+        exclude: Set[str] = {str(i) for i in (exclude_ids or []) if i}
+
+        candidates = await RadioService._seed_candidates(
+            db, user_id, seed_type, seed_id, limit, allow_network
+        )
+
+        # Recently heard tracks make poor radio, but on a small catalogue
+        # dropping them can empty the batch -- so they are only a preference.
+        recent = await RadioService._recent_song_ids(db, user_id)
+        picks = RadioService._collect(candidates, exclude | recent)
+        if len(picks) < limit:
+            picks = RadioService._collect(candidates, exclude, into=picks)
+
+        if len(picks) < limit:
+            padding = await RadioService._padding(db, limit, allow_network)
+            picks = RadioService._collect(padding, exclude, into=picks)
+
+        return RadioService._popularity_shuffle(picks)[:limit]
+
+    @staticmethod
+    def _collect(
+        songs: Iterable[Optional[Song]],
+        excluded: Set[str],
+        into: Optional[List[Song]] = None
+    ) -> List[Song]:
+        """Append `songs`, skipping excluded ids and anything already present."""
+        out: List[Song] = list(into or [])
+        seen = {s.id for s in out} | set(excluded)
+        for song in songs:
+            if song is None or song.id in seen:
+                continue
+            seen.add(song.id)
+            out.append(song)
+        return out
+
+    @staticmethod
+    def _popularity_shuffle(songs: Sequence[Song]) -> List[Song]:
+        # Well-played tracks surface more often without the station collapsing
+        # into the same fixed list on every request.
+        return sorted(
+            songs,
+            key=lambda s: ((s.play_count or 0) + 1) * random.uniform(0.5, 1.5),
+            reverse=True
+        )
+
+    @staticmethod
+    async def _recent_song_ids(db: AsyncSession, user_id: str) -> Set[str]:
+        stmt = (
+            select(ListeningHistory.song_id)
+            .where(ListeningHistory.user_id == user_id)
+            .order_by(desc(ListeningHistory.started_at))
+            .limit(RECENT_HISTORY_WINDOW)
+        )
+        res = await db.execute(stmt)
+        return {sid for sid in res.scalars().all() if sid}
+
+    @staticmethod
+    async def _seed_candidates(
+        db: AsyncSession,
+        user_id: str,
+        seed_type: str,
+        seed_id: Optional[str],
+        limit: int,
+        allow_network: bool
+    ) -> List[Song]:
+        # Over-fetch: much of this pool is dropped as already-served or recent.
+        pool = max(limit * 3, limit)
+
+        if seed_type == "song" and seed_id:
+            songs = await RecommendationService.get_similar_songs(db, seed_id, limit=pool)
+            if allow_network and len(songs) < limit:
+                songs = songs + await RadioService._upstream_for_song(db, seed_id, pool)
+            return songs
+
+        if seed_type == "artist" and seed_id:
+            songs = await RadioService._artist_songs(db, seed_id, pool)
+            if allow_network and len(songs) < limit:
+                songs = songs + await RadioService._upstream_for_artist(db, seed_id, pool)
+            return songs
+
+        if seed_type == "mood" and seed_id:
+            return await RecommendationService.get_mood_mix(db, seed_id, limit=pool)
+
+        return await RadioService._personalized_songs(db, user_id, pool)
+
+    @staticmethod
+    async def _artist_songs(db: AsyncSession, seed_id: str, limit: int) -> List[Song]:
+        artist = await RadioService._find_artist(db, seed_id)
+        if artist:
+            conditions = [Song.artist_id == artist.id, Song.artist_name.ilike(f"%{artist.name}%")]
+        else:
+            conditions = [Song.artist_name.ilike(f"%{seed_id}%")]
+        stmt = select(Song).where(or_(*conditions)).order_by(Song.play_count.desc()).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def _personalized_songs(db: AsyncSession, user_id: str, limit: int) -> List[Song]:
+        """
+        The personalized station's candidate pool.
+
+        Prefers the ranked ML pipeline, which is what makes an endless station
+        feel like it knows the listener: the SQL path below can only filter on the
+        user's top genres and artists, so it returns the same rows in the same
+        popularity order every time. Any failure -- or ML_ENABLED off -- falls
+        through to that heuristic, because a station that plays something is worth
+        more than one that errors.
+        """
+        if settings.ML_ENABLED:
+            try:
+                songs = await RadioService._ml_personalized_songs(db, user_id, limit)
+                if songs:
+                    return songs
+            except Exception:
+                logger.exception("ML station pool failed for %s; using heuristics", user_id)
+
+        return await RadioService._heuristic_personalized_songs(db, user_id, limit)
+
+    @staticmethod
+    async def _ml_personalized_songs(db: AsyncSession, user_id: str, limit: int) -> List[Song]:
+        """Ranked, diversified continuation for one listener.
+
+        Exploration is left off: `build_batch` already drops recently heard tracks
+        and the caller excludes everything the station has served, so the batch is
+        novel by construction. Adding ε-greedy swaps on top would only trade a
+        well-ranked track for a random one.
+        """
+        from app.ml import candidates as ml_candidates
+        from app.ml import diversify, ranker as ml_ranker
+        from app.ml.user_state import build_user_state, load_song_stats, max_play_count
+
+        if not is_uuid(user_id):
+            return []
+
+        state = await build_user_state(db, user_id)
+        pool = await ml_candidates.generate(db, state, limit=min(limit * 4, 400))
+        if len(pool) == 0:
+            return []
+
+        stats = await load_song_stats(db, list(pool.songs.keys()))
+        active_ranker = await ml_ranker.load_ranker(db)
+        scored = active_ranker.rank(
+            pool.song_list(),
+            state,
+            sources=pool.source_map(),
+            cf_scores=pool.cf_scores,
+            stats=stats,
+            max_play_count=await max_play_count(db),
+            vectors=pool.vectors,
+        )
+        final = diversify.finalize(
+            scored,
+            limit=limit,
+            played_song_ids=set(state.play_counts.keys()),
+            max_per_artist=3,
+            exploration_rate=0.0,
+        )
+        return [s.song for s in final]
+
+    @staticmethod
+    async def _heuristic_personalized_songs(db: AsyncSession, user_id: str, limit: int) -> List[Song]:
+        affinities = await RecommendationService.calculate_user_affinities(db, user_id)
+        conditions = []
+        if affinities["top_genres"]:
+            conditions.append(Song.genre.in_(affinities["top_genres"][:3]))
+        if affinities["top_artists"]:
+            conditions.append(Song.artist_name.in_(affinities["top_artists"][:5]))
+        if affinities["top_moods"]:
+            conditions.append(Song.mood.in_(affinities["top_moods"][:3]))
+        if not conditions:
+            # No history yet: the padding step supplies the whole batch.
+            return []
+        stmt = select(Song).where(or_(*conditions)).order_by(Song.play_count.desc()).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def _padding(db: AsyncSession, limit: int, allow_network: bool) -> List[Song]:
+        """
+        Last resort so a station never comes back empty. Only an explicit start
+        may go upstream for this; autoplay stays local.
+        """
+        songs: List[Song] = []
+        if allow_network:
+            try:
+                songs = list(await catalog_service.get_trending(db, limit=limit))
+            except Exception as e:
+                logger.warning(f"Radio padding from trending failed: {e}")
+
+        stmt = select(Song).order_by(Song.play_count.desc()).limit(limit * 2)
+        res = await db.execute(stmt)
+        return songs + list(res.scalars().all())
+
+    # --------------------------------------------------------------- upstream
+
+    @staticmethod
+    async def _upstream_for_song(db: AsyncSession, seed_song_id: str, limit: int) -> List[Song]:
+        song = await catalog_service.get_song_by_id(db, seed_song_id)
+        if not song or not song.artist_id:
+            return []
+        return await RadioService._upstream_for_artist(db, song.artist_id, limit)
+
+    @staticmethod
+    async def _upstream_for_artist(db: AsyncSession, seed_id: str, limit: int) -> List[Song]:
+        """
+        Best-effort catalogue widening. Gaana keys off its own artist id, so this
+        needs a local artist row to supply one -- a name-only seed has nothing to
+        query with. Failure here is not an error, it just means the batch comes
+        from what we already hold.
+        """
+        artist = await RadioService._find_artist(db, seed_id)
+        key = (artist.external_id or artist.seokey) if artist else None
+        if not key:
+            return []
+
+        songs: List[Song] = []
+        try:
+            payload = await catalog_service.gaana.get_top_tracks(str(key), limit=limit)
+            raw_tracks = payload.get("tracks") if isinstance(payload, dict) else None
+            for raw in raw_tracks or []:
+                if isinstance(raw, dict) and raw.get("seokey"):
+                    songs.append(await catalog_service.upsert_gaana_song(db, raw))
+        except Exception as e:
+            logger.warning(f"Radio enrichment for artist {seed_id} failed: {e}")
+        return songs
+
+
+radio_service = RadioService()

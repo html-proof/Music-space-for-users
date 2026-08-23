@@ -8,6 +8,8 @@ from app.api.playlists import router as playlists_router
 from app.api.recommendations import router as recommendations_router
 from app.api.search import router as search_router
 from app.api.catalog import router as catalog_router
+from app.api.stats import router as stats_router
+from app.api.ml import router as ml_router
 
 __all__ = [
     "auth_router",
@@ -20,4 +22,6 @@ __all__ = [
     "recommendations_router",
     "search_router",
     "catalog_router",
+    "stats_router",
+    "ml_router",
 ]

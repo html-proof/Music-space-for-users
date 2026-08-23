@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.history import ListeningHistory, SearchHistory
 from app.models.song import Song
 from app.services.cache_service import cache_service
+from app.services.signal_service import SignalService
 from app.utils.cache_keys import home_recommendations_key
 from app.config.settings import settings
 
@@ -47,6 +48,19 @@ class HistoryService:
         db.add(entry)
         await db.commit()
         await db.refresh(entry)
+
+        # Fan the listen out to the entity-level signal log (song / artist /
+        # genre / language / mood). Written after the commit above rather than in
+        # the same transaction: the history row is the record of truth, and a
+        # signal-log failure must not roll back a play the user actually made.
+        await SignalService.record_song_event(
+            db,
+            user_id=user_id,
+            song_id=song_id,
+            completion_percentage=completion_percentage,
+            skipped=entry.skipped,
+            commit=True,
+        )
 
         # A new listen changes the affinities the home feed is built from.
         await cache_service.delete(home_recommendations_key(user_id))
@@ -106,6 +120,15 @@ class HistoryService:
         db.add(entry)
         await db.commit()
         await db.refresh(entry)
+        # A search is weak evidence of intent, but it is evidence: the query
+        # signal is what lets a searched-for artist influence the feed before the
+        # user has played anything by them.
+        await SignalService.record_search(db, user_id, query)
+        try:
+            await db.commit()
+        except Exception:
+            logger.exception("failed to commit search signal for %s", user_id)
+            await db.rollback()
         return entry
 
     @staticmethod

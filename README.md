@@ -84,9 +84,22 @@ erDiagram
 - **Telemetry Event Log**: Granular event ingestion (`PLAY`, `PAUSE`, `RESUME`, `SEEK`, `SKIP`, `NEXT`, `PREVIOUS`, `STOP`, `BUFFER_START`, `BUFFER_END`, `COMPLETE`).
 - **WebSocket Synchronization**: Real-time state broadcasting across all active devices on `/ws/player/{device_id}` backed by Redis Pub/Sub.
 
+### 📡 Radio Stations & Endless Autoplay
+- **Seeded Stations**: `POST /api/player/radio` starts an endless station from a song, an artist, a mood, or (with `seed_type: personalized`) the listener's own history.
+- **Autoplay Refill**: When a queue empties, `POST /api/player/next` continues the station instead of stopping. A session with no station at all seeds an implicit one from whatever was playing, so playback never dead-ends.
+- **No Repeats**: Served track ids are remembered per station (bounded, with a 6-hour TTL) so a refill does not replay what was just heard.
+- **Explicit Intent Wins**: `stop`, or playing something outside the station, ends it. Playing a track that belongs to the station — what a client does right after starting one — keeps it alive.
+- **Graceful Degradation**: Station state lives in Redis when configured and falls back to process memory otherwise, which is the mode a free Render deployment without Upstash runs in.
+
 ### 📊 Listening History & 30s/50% Rule
 - A track only counts as a meaningful listen if **`duration >= 30 seconds`** OR **`completion >= 50%`**.
 - Casual skips and partial listens are cataloged separately without skewing recommendation affinity.
+
+### 📈 Listening Statistics (`/api/me`)
+- **Top Tracks & Artists**: Ranked by play count, tie-broken by seconds actually listened, so a track played twice in full outranks one started twice and abandoned.
+- **Windows**: `range=4weeks` (default), `6months`, or `all`.
+- **Summary**: Total plays, minutes listened, distinct songs and artists, skip rate, average seconds per play, plus a taste breakdown by genre, language, and mood.
+- **Computed On Demand**: Aggregated in SQL per request rather than in a rollup table — the free plan has neither background workers nor cron, and `ix_history_user_started` covers the filter.
 
 ### 🧠 Recommendation Engine & Dynamic Mixes
 - **Multi-Factor Affinity Scoring Formula**:
@@ -100,6 +113,12 @@ erDiagram
   - `Trending Now` & `New Releases`
   - `Mood Mix` (Chill, Workout, Focus, Party, etc.)
   - `Language Mix`
+
+### 🤖 Learned Ranker (`/api/ml`)
+- **Candidates → Rank → Diversify**: content similarity, item-item collaborative filtering, artist/genre overlap, popularity, and playlist co-occurrence each retrieve candidates; a linear ranker scores them on 25 features; MMR diversification caps repeats per artist. Feeds the home mixes, similar-song/artist shelves, autoplay, and search re-ranking.
+- **Hand-Tuned Prior, Always Available**: `ML_ENABLED=False`, no model ever trained, or a stored model that fails validation all fall back to the same hand-tuned weights that shipped before any training happened — a bad or missing model degrades ranking quality, it never breaks the endpoint.
+- **Offline-Gated Promotion**: a freshly trained model is only promoted to serve traffic if it clears a minimum sample/user count *and* beats both a fixed AUC floor and the model currently active on held-out data. Otherwise it's saved (for `GET /api/ml/status` to show) but never served.
+- **Two Ways to Train**: `python scripts/train_ml.py` (meant to run out-of-process, e.g. as a scheduled job, so a training pass doesn't compete with request handling on a small instance) or `POST /api/ml/retrain`, gated by the `ML_ADMIN_TOKEN` shared secret since there's no admin role to hang authorization off.
 
 ### 🔓 Stream Decryption & Music Catalog
 - Integrated [Gaana](https://gaana.com) scraping and AES-CBC stream URL decryption engine.
@@ -149,11 +168,18 @@ All responses follow the unified response structure:
 | `POST` | `/api/player/pause` | Pause track playback |
 | `POST` | `/api/player/resume` | Resume playback |
 | `POST` | `/api/player/seek` | Seek to position |
-| `POST` | `/api/player/next` | Skip to next track in queue |
+| `POST` | `/api/player/next` | Skip to next track in queue (autoplays the station when the queue is empty) |
 | `POST` | `/api/player/previous` | Return to start / previous track |
-| `POST` | `/api/player/stop` | Stop playback |
+| `POST` | `/api/player/stop` | Stop playback (also ends any active radio station) |
+| `POST` | `/api/player/radio` | Start an endless radio station from a song, artist, mood, or listening history |
 | `POST` | `/api/player/sync` | Synchronize state across devices |
 | `POST` | `/api/player/events` | Ingest playback telemetry events |
+
+Starting a station — `seed_id` is required for every `seed_type` except `personalized`, and an unresolvable seed returns `404 SEED_NOT_FOUND` rather than a server error:
+```json
+{ "seed_type": "artist", "seed_id": "daft-punk", "device_id": "iphone-1" }
+```
+`seed_type` accepts `song`, `artist`, `mood`, or `personalized`. An artist seed resolves from an artist id, a Gaana id, a seokey, or a plain credited name. The response is a normal playback state: the first track plus a pre-filled queue.
 
 ### Library & Favorites (`/api/library` & `/api/songs`)
 | Method | Endpoint | Description |
@@ -188,6 +214,15 @@ All responses follow the unified response structure:
 | `GET` | `/api/recommendations/similar-artist/{artist_id}` | Similar artists |
 | `GET` | `/api/recommendations/mood/{mood}` | Mood-tailored playlist (Chill, Workout, etc.) |
 
+### Machine Learning (`/api/ml`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/ml/status` (alias: `/api/ml`) | Which model is serving, its offline metrics, and the active hyperparameters |
+| `POST` | `/api/ml/retrain` | Retrain the ranker; requires `X-ML-Admin-Token` |
+| `POST` | `/api/ml/invalidate-cache` | Drop the in-process model cache so every worker re-reads the active artifact; requires `X-ML-Admin-Token` |
+
+`GET /api/ml/status` is readable by any authenticated user — it's diagnostic, not sensitive. Both other endpoints refuse every request with `503 ml_retrain_disabled` when `ML_ADMIN_TOKEN` isn't set, and `403` on a wrong token. `retrain` also accepts `?dry_run=true` (train and report metrics without persisting) and `?force=true` (promote even if the quality gate fails), and returns `409 training_in_progress` if a pass is already running.
+
 ### Search & History (`/api/search` & `/api/history`)
 | Method | Endpoint | Description |
 |---|---|---|
@@ -197,6 +232,26 @@ All responses follow the unified response structure:
 | `GET` | `/api/history` | Paginated listening history |
 | `GET` | `/api/history/recent` | Recent listens |
 | `DELETE` | `/api/history` | Clear listening history |
+
+`GET /api/search` takes `query` (required), `limit` (1–50, default 20), and `type`:
+
+| `type` | Result |
+|---|---|
+| `all` *(default)* | Songs, albums, and artists in one response |
+| `track` | Songs only |
+| `album` | Albums only |
+| `artist` | Artists only |
+
+The response always carries all three keys — `songs`, `albums`, `artists` — with the unrequested ones empty, so a client can read the same shape regardless of `type`. Matched albums and artists are upserted into the local catalog as they are found, and an unreachable Gaana degrades to searching what is already stored rather than failing.
+
+### Listening Statistics (`/api/me`)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/me/top/tracks` | Most-played tracks, ranked with play counts and time listened |
+| `GET` | `/api/me/top/artists` | Most-played artists, aggregated across their tracks |
+| `GET` | `/api/me/stats` | Totals, skip rate, and taste breakdown by genre, language, and mood |
+
+All three accept `range=4weeks` (default), `6months`, or `all`; the two `top` endpoints also accept `limit` (1–50, default 20). Every window is echoed back in the response, and an account with no history yet returns zeroed figures rather than an error.
 
 ### WebSockets (`/ws/player/{device_id}`)
 Connect via `ws://localhost:8000/ws/player/{device_id}?token={firebase_id_token}` to receive real-time player updates and dispatch playback actions.
@@ -254,10 +309,16 @@ docker-compose ps
 
 ## 7. Running the Automated Test Suite
 
-The test suite contains **73 comprehensive tests** covering authentication, device management, player transitions, listening thresholds, library management, playlist reordering, recommendation scoring, and WebSockets:
+The test suite contains **246 comprehensive tests** covering authentication, device management, player transitions, radio stations and autoplay, listening thresholds, library management, playlist reordering, recommendation scoring, the ML ranker's status/retrain endpoints, search across tracks/albums/artists, listening statistics, and WebSockets:
 
 ```bash
 python -m pytest -v
+```
+
+It runs against SQLite by default. To run it against PostgreSQL instead — worth doing before deploying, since `uuid` columns and `ORDER BY` ambiguity behave differently there — point `TEST_DATABASE_URL` at a **throwaway** database; the suite drops and recreates every table:
+
+```bash
+TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/gaanapy_test python -m pytest -q
 ```
 
 ---
@@ -291,3 +352,12 @@ python -m pytest -v
 5. Click **Create Web Service** to trigger automatic deployment.
 
    - Build using the provided [Dockerfile](file:///c:/Users/Seban/Videos/GaanaPy/Dockerfile).
+
+### Free Tier Notes
+
+A free Render web service **spins down after roughly 15 minutes without traffic**, and the next request pays a cold start of ~50 seconds while the container boots. Everything above is designed around that:
+
+- **Keep-alive must come from outside.** A self-ping cannot work — a sleeping service has no process to run the timer, so nothing wakes it but an inbound request. Point an external monitor ([UptimeRobot](https://uptimerobot.com), [cron-job.org](https://cron-job.org), or a GitHub Actions schedule) at `https://<your-service>.onrender.com/health` every 10 minutes.
+- **No background workers or cron.** Both are paid plans, so nothing here relies on them: radio batches, search upserts, and every listening statistic are computed inside the request that asks for them.
+- **The filesystem is ephemeral.** Anything written to disk is lost on restart. Persistent state belongs in PostgreSQL; cached state belongs in Redis.
+- **Redis is optional.** Without `REDIS_ENABLED`, caching and radio stations fall back to process memory. That works, but it is per-instance and it dies with the container — a free [Upstash](https://upstash.com) database is worth wiring in if station continuity across restarts matters.

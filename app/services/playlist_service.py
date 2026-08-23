@@ -6,6 +6,7 @@ from app.db.base import is_uuid
 from app.models.playlist import Playlist, PlaylistSong
 from app.models.song import Song
 from app.schemas.playlist import PlaylistCreate, PlaylistUpdate
+from app.services.signal_service import SignalService
 
 logger = logging.getLogger("playlist_service")
 
@@ -156,6 +157,18 @@ class PlaylistService:
         db.add(entry)
         await db.commit()
         await db.refresh(entry)
+
+        # A playlist add is the second-strongest positive after a like: it is a
+        # deliberate act of curation, not a passive listen.
+        song = (await db.execute(select(Song).where(Song.id == song_id))).scalar_one_or_none()
+        if song is not None and await SignalService.record_playlist_add(db, user_id, song):
+            try:
+                await db.commit()
+            except Exception:
+                # The PlaylistSong row is already durable; a signal failure must
+                # not make a successful add look like an error.
+                logger.exception("failed to commit playlist-add signal for %s", user_id)
+                await db.rollback()
         return entry
 
     @staticmethod

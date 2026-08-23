@@ -132,7 +132,7 @@ async def test_complete_e2e_spotify_lifecycle(client: AsyncClient, auth_headers:
     # -------------------------------------------------------------
     # 4. SEARCH & SEARCH HISTORY
     # -------------------------------------------------------------
-    search_res = await client.get("/api/search?query=Harlow", headers=auth_headers)
+    search_res = await client.get("/api/search?query=Harlow&type=track", headers=auth_headers)
     assert search_res.status_code == 200
     assert len(search_res.json()["data"]["songs"]) > 0
 
