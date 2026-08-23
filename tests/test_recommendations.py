@@ -77,6 +77,73 @@ async def test_home_feed_uses_preferred_language_for_a_brand_new_user(
 
 
 @pytest.mark.asyncio
+async def test_home_feed_catalog_shelves_refetch_on_cache_hit(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    """Trending/New Releases must never be frozen inside the cached
+    personalized payload: they are refetched on every request, including
+    when the personalized shelves are served from cache. This also guards
+    against the shelf being duplicated by that refetch."""
+    from app.services.cache_service import cache_service
+    from app.services.catalog_service import catalog_service
+
+    # catalog_service.get_trending has its own 30-minute cache in front of
+    # the raw Gaana call -- bypass only that layer so this test can observe
+    # the raw call happening again, without disturbing the home-feed cache
+    # this test is actually exercising.
+    real_get_json = cache_service.get_json
+
+    async def get_json_bypassing_trending_cache(key: str):
+        if key.startswith("catalog:trending:") or key.startswith("catalog:newreleases:"):
+            return None
+        return await real_get_json(key)
+
+    monkeypatch.setattr(cache_service, "get_json", get_json_bypassing_trending_cache)
+
+    calls = {"trending": 0}
+
+    async def fake_get_trending(language, limit):
+        calls["trending"] += 1
+        return [{
+            "seokey": f"cache-check-{calls['trending']}",
+            "title": "Cache Check Track",
+            "artists": "Cache Check Artist",
+            "album": "Single",
+            "duration": "100",
+            "images": {"urls": {}},
+            "stream_urls": {"urls": {}},
+            "language": language,
+            "genres": "Pop",
+            "is_explicit": False,
+        }]
+
+    async def empty_new_releases(language, limit):
+        return {"tracks": []}
+
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "get_new_releases", empty_new_releases)
+
+    await seed_recommendation_catalog(db_session)
+
+    first = await client.get("/api/recommendations/home", headers=auth_headers)
+    assert first.status_code == 200
+    first_categories = first.json()["data"]["categories"]
+    trending_first = [c for c in first_categories if c["category_type"] == "trending"]
+    assert len(trending_first) == 1
+
+    second = await client.get("/api/recommendations/home", headers=auth_headers)
+    assert second.status_code == 200
+    second_categories = second.json()["data"]["categories"]
+    trending_second = [c for c in second_categories if c["category_type"] == "trending"]
+    # Exactly one -- not zero (it must still be there on a cache hit) and not
+    # two (the idempotent-append guard must not have failed).
+    assert len(trending_second) == 1
+    # The mock was actually called again, proving this shelf was not served
+    # from the personalized-shelves cache.
+    assert calls["trending"] >= 2
+
+
+@pytest.mark.asyncio
 async def test_similar_songs_and_moods(client: AsyncClient, db_session: AsyncSession):
     songs = await seed_recommendation_catalog(db_session)
 

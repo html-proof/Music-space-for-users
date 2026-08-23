@@ -127,6 +127,19 @@ class RecommendationService:
         user_id: str,
         user_name: str = "Friend"
     ) -> HomeRecommendationsResponse:
+        """Personalized shelves are cached; catalog shelves (Trending, New
+        Releases) are not.
+
+        Ranking a user's taste against the candidate pool is the expensive
+        part of this response, so it is worth caching for
+        RECOMMENDATION_CACHE_TTL_SECONDS. Trending/New Releases are cheap by
+        comparison (catalog_service already caches the underlying Gaana call
+        for 30 minutes) and are what every user actually expects to look
+        current -- baking them into an hour-long cached response meant a
+        chart that moved on Gaana could sit stale here for up to an hour
+        after. They are now fetched fresh on every request, on both the
+        cache-hit and cache-miss paths below.
+        """
         cache_key = home_recommendations_key(user_id)
         cached = await cache_service.get_json(cache_key)
         if cached:
@@ -135,6 +148,7 @@ class RecommendationService:
                 # The greeting depends on the current hour and the caller's name,
                 # so it is recomputed rather than served from the cache.
                 response.greeting = RecommendationService._greeting(user_name)
+                await RecommendationService._append_catalog_shelves(db, response.categories, user_id)
                 return response
             except Exception as e:
                 logger.warning(f"Discarding unusable cached recommendations for {user_id}: {e}")
@@ -155,26 +169,28 @@ class RecommendationService:
         if not categories:
             categories, top_mix = await RecommendationService._heuristic_shelves(db, user_id)
 
-        # Catalog shelves come from Gaana and are not personalized, so they are
-        # appended after whichever path produced the personalized ones.
-        await RecommendationService._append_catalog_shelves(db, categories, user_id)
-
-        response = HomeRecommendationsResponse(
-            greeting=RecommendationService._greeting(user_name),
-            categories=categories,
-            top_mix=top_mix[:6],
-        )
-
         try:
             await cache_service.set_json(
                 cache_key,
-                response.model_dump(mode="json"),
+                HomeRecommendationsResponse(
+                    greeting=RecommendationService._greeting(user_name),
+                    categories=categories,
+                    top_mix=top_mix[:6],
+                ).model_dump(mode="json"),
                 ttl_seconds=settings.RECOMMENDATION_CACHE_TTL_SECONDS
             )
         except Exception as e:
             logger.warning(f"Failed to cache recommendations for {user_id}: {e}")
 
-        return response
+        # Appended after caching, and to a fresh list each time -- these must
+        # never end up baked into the cached personalized payload above.
+        await RecommendationService._append_catalog_shelves(db, categories, user_id)
+
+        return HomeRecommendationsResponse(
+            greeting=RecommendationService._greeting(user_name),
+            categories=categories,
+            top_mix=top_mix[:6],
+        )
 
     @staticmethod
     async def _ml_shelves(
@@ -446,7 +462,17 @@ class RecommendationService:
         categories: List[RecommendationCategoryResponse],
         user_id: str,
     ) -> None:
-        """Trending and New Releases, in the user's preferred language when known."""
+        """Trending and New Releases, in the user's preferred language when known.
+
+        Idempotent by construction: drops any existing trending/new_releases
+        entries before appending fresh ones, so a cached response saved by an
+        older version of this service (from before catalog shelves were
+        excluded from the cache) never ends up with the pair duplicated
+        during a deploy's cache-TTL rollover window.
+        """
+        categories[:] = [
+            c for c in categories if c.category_type not in ("trending", "new_releases")
+        ]
         language = "English"
         if is_uuid(user_id):
             res = await db.execute(
