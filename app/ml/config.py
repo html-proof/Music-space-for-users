@@ -99,6 +99,7 @@ FEATURE_NAMES = (
     "recency_decay",
     "lang_pref_match",
     "genre_pref_match",
+    "artist_pref_match",
     "explicit_penalty",
     "duration_dev",
     "artist_followed",
@@ -132,6 +133,11 @@ PRIOR_WEIGHTS = {
     "recency_decay": -0.35,
     "lang_pref_match": 0.65,
     "genre_pref_match": 0.55,
+    # Artist is the strongest content signal (see FIELD_WEIGHTS) and a
+    # declared favorite is an explicit choice, not an inferred one -- weighted
+    # above genre/language but below artist_followed, which is a stronger,
+    # separately-taken action.
+    "artist_pref_match": 0.85,
     "explicit_penalty": -2.50,
     "duration_dev": -0.30,
     "artist_followed": 1.10,

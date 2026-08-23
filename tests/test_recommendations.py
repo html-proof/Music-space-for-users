@@ -77,6 +77,43 @@ async def test_home_feed_uses_preferred_language_for_a_brand_new_user(
 
 
 @pytest.mark.asyncio
+async def test_favorite_artists_retrieve_candidates_before_any_history(db_session: AsyncSession):
+    """A freshly onboarded user has no artist_affinity yet (that only builds
+    from actual plays/likes) -- their declared favorite_artists must still
+    retrieve candidates by that artist, the same way favorite_genres and
+    preferred_languages already do. Without this fallback, picking artists
+    during onboarding had no effect on retrieval until the user had actually
+    played something by them."""
+    from datetime import datetime, timezone
+    from app.ml import candidates as ml_candidates
+    from app.ml.features import UserState, song_vector
+
+    chosen = Song(
+        external_id="rec-fav-artist", title="Chosen Artist Song",
+        artist_name="Chosen Artist", genre="Pop", duration=200,
+    )
+    other = Song(
+        external_id="rec-other-artist", title="Other Artist Song",
+        artist_name="Other Artist", genre="Pop", duration=200,
+    )
+    db_session.add(chosen)
+    db_session.add(other)
+    await db_session.commit()
+    await db_session.refresh(chosen)
+
+    state = UserState(
+        user_id="anon-fixture",
+        as_of=datetime.now(timezone.utc),
+        taste_vector=song_vector(chosen),
+        favorite_artists={"chosen artist"},
+    )
+
+    cand = ml_candidates.CandidateSet()
+    await ml_candidates._from_artist_genre(db_session, state, cand, cap=10, exclude=set())
+    assert str(chosen.id) in cand.songs
+
+
+@pytest.mark.asyncio
 async def test_home_feed_catalog_shelves_refetch_on_cache_hit(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):

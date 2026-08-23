@@ -87,7 +87,7 @@ async def _from_content(
 
     langs = _top(state.language_affinity, 3) or list(state.preferred_languages)[:3]
     genres = _top(state.genre_affinity, 5) or list(state.favorite_genres)[:5]
-    artists = _top(state.artist_affinity, 8)
+    artists = _top(state.artist_affinity, 8) or list(state.favorite_artists)[:8]
 
     filters = []
     if langs:
@@ -176,7 +176,7 @@ async def _from_artist_genre(
     def _top(scores: Dict[str, float], n: int) -> List[str]:
         return [k for k, _ in sorted(scores.items(), key=lambda p: p[1], reverse=True)[:n]]
 
-    artists = _top(state.artist_affinity, 5)
+    artists = _top(state.artist_affinity, 5) or list(state.favorite_artists)[:5]
     genres = _top(state.genre_affinity, 3) or list(state.favorite_genres)[:3]
     if not artists and not genres:
         return

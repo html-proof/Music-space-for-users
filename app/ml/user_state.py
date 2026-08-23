@@ -77,6 +77,7 @@ class StateAccumulator:
         self.saved_album_ids: Set[str] = set()
         self.preferred_languages = {str(v).strip().lower() for v in (preferred_languages or ()) if v}
         self.favorite_genres = {str(v).strip().lower() for v in (favorite_genres or ()) if v}
+        self.favorite_artists = {str(v).strip().lower() for v in (favorite_artists or ()) if v}
         self.allows_explicit = allows_explicit
         self._duration_sum = 0.0
         self._duration_n = 0
@@ -150,6 +151,7 @@ class StateAccumulator:
             saved_album_ids=set(self.saved_album_ids),
             preferred_languages=set(self.preferred_languages),
             favorite_genres=set(self.favorite_genres),
+            favorite_artists=set(self.favorite_artists),
             allows_explicit=self.allows_explicit,
             mean_duration=(self._duration_sum / self._duration_n) if self._duration_n else 0.0,
             recent_song_ids=list(self._recent),

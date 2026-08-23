@@ -190,6 +190,7 @@ class UserState:
     saved_album_ids: Set[str] = field(default_factory=set)
     preferred_languages: Set[str] = field(default_factory=set)
     favorite_genres: Set[str] = field(default_factory=set)
+    favorite_artists: Set[str] = field(default_factory=set)
     allows_explicit: bool = True
     mean_duration: float = 0.0
     recent_song_ids: List[str] = field(default_factory=list)
@@ -285,6 +286,7 @@ def build_ranking_features(
         "recency_decay": recency,
         "lang_pref_match": 1.0 if language and language in state.preferred_languages else 0.0,
         "genre_pref_match": 1.0 if genre and genre in state.favorite_genres else 0.0,
+        "artist_pref_match": 1.0 if artist_name and artist_name in state.favorite_artists else 0.0,
         "explicit_penalty": 1.0 if (is_explicit and not state.allows_explicit) else 0.0,
         "duration_dev": duration_dev,
         "artist_followed": 1.0 if artist_id and artist_id in state.followed_artists else 0.0,
