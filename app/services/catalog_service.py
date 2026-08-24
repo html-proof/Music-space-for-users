@@ -335,6 +335,50 @@ class CatalogService:
         await cache_service.set_json(cache_key, [a.id for a in artists], ttl_seconds=1800)
         return artists
 
+    async def resolve_album_seokey(self, db: AsyncSession, reference: str) -> Optional[str]:
+        """The Gaana seokey for an album named by any identifier we hand out.
+
+        Gaana album lookups are keyed by seokey, but a song payload carries
+        `album_id` -- our uuid -- and nothing else about its album. Without this,
+        "open the album this song is on" was impossible from anywhere a song is
+        listed: the client held the wrong kind of id and had no way to trade it
+        for the right one.
+
+        Accepts, in order of what a client might plausibly hold:
+
+        * a seokey, which is passed straight through;
+        * our own album uuid, from any song or album payload;
+        * Gaana numeric `album_id`, which we store as `external_id`.
+
+        Returns None when the album is unknown, or known but has no seokey --
+        the latter happens for a single, where Gaana names no album at all and
+        `catalog_upsert` mints a synthetic `single-<track seokey>` key. There is
+        no Gaana album page for those, so the caller must 404 rather than
+        invent one.
+        """
+        reference = (reference or "").strip()
+        if not reference:
+            return None
+
+        # A seokey is the identifier Gaana itself uses, so anything that is not
+        # one of ours is assumed to be one and passed through untouched. Our own
+        # ids are a uuid or an all-digit Gaana album id; a real seokey
+        # ("manjummel-boys") is neither.
+        if not is_uuid(reference) and not reference.isdigit():
+            return reference
+
+        conditions = [Album.external_id == reference]
+        if is_uuid(reference):
+            conditions.append(Album.id == reference)
+        album = (
+            await db.execute(select(Album).where(or_(*conditions)).limit(1))
+        ).scalars().first()
+        if album is None:
+            return None
+        # A synthetic single- key is ours, not Gaana, and resolves to nothing.
+        seokey = (album.seokey or "").strip()
+        return seokey or None
+
     async def get_song_by_id(self, db: AsyncSession, song_id: str) -> Optional[Song]:
         # song_id is either one of our own UUIDs or a Gaana seokey such as
         # "simtaangaran". Song.id is a native uuid on PostgreSQL, so only

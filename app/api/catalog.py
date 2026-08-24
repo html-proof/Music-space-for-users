@@ -31,9 +31,29 @@ async def get_gaana_song_info(
 
 @router.get("/albums/info", summary="Retrieve album info with decrypted tracks")
 async def get_gaana_album_info(
-    seokey: str = Query(..., min_length=1, max_length=200)
+    seokey: str = Query(
+        ..., min_length=1, max_length=200,
+        description="Gaana album seokey, our album uuid, or Gaana numeric "
+                    "album_id -- whichever the client happens to hold.",
+    ),
+    db: AsyncSession = Depends(get_db),
 ):
-    result = await catalog_service.gaana.get_album_info([seokey], True)
+    """Album detail and tracks, always fetched live from Gaana.
+
+    The parameter keeps its name for compatibility but no longer has to *be* a
+    seokey. A song payload carries `album_id` (our uuid) and nothing else about
+    its album, so requiring a seokey here made "open this song album"
+    impossible from every screen that lists songs. Resolution is one indexed
+    lookup; see `catalog_service.resolve_album_seokey`.
+    """
+    resolved = await catalog_service.resolve_album_seokey(db, seokey)
+    if not resolved:
+        return api_error(
+            "NOT_FOUND",
+            "This track is not part of an album we can open.",
+            status_code=404,
+        )
+    result = await catalog_service.gaana.get_album_info([resolved], True)
     if isinstance(result, dict) and "error" in result:
         return api_error("NOT_FOUND", result["error"], status_code=404)
     return api_response(result)

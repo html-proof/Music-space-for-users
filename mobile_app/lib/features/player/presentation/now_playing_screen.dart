@@ -107,6 +107,42 @@ class NowPlayingScreen extends ConsumerWidget {
                               song.artistName,
                               style: TextStyle(color: Colors.white.withValues(alpha: 0.75), fontSize: 15),
                             ),
+                            // The album is the one piece of context the full
+                            // player was missing, and the most natural place to
+                            // offer "take me there" -- a song row can only do
+                            // it on long-press, which is easy to miss.
+                            if ((song.albumId ?? '').isNotEmpty &&
+                                song.albumName.trim().isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              InkWell(
+                                onTap: () => context.push('/album/${song.albumId}'),
+                                borderRadius: BorderRadius.circular(4),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 2),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.album_outlined,
+                                          size: 14,
+                                          color: Colors.white.withValues(alpha: 0.65)),
+                                      const SizedBox(width: 6),
+                                      Flexible(
+                                        child: Text(
+                                          song.albumName,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(alpha: 0.65),
+                                            fontSize: 13,
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),

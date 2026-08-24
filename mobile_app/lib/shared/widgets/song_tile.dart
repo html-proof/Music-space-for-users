@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_theme.dart';
 import '../../features/player/application/player_providers.dart';
 import '../models/song.dart';
+import 'song_actions_sheet.dart';
 
 class SongTile extends ConsumerWidget {
   const SongTile({
@@ -14,12 +15,20 @@ class SongTile extends ConsumerWidget {
     this.trailing,
     this.dense = false,
     this.index,
+    this.showActions = true,
   });
 
   final Song song;
   final VoidCallback onTap;
   final Widget? trailing;
   final bool dense;
+
+  /// Long-press opens the secondary actions sheet ("Go to album").
+  ///
+  /// Put on the tile rather than on each screen so every list a song appears
+  /// in -- home, search, library, playlists, artist, album -- gets it from one
+  /// place. Tapping still plays, which is what a tap on a song row should do.
+  final bool showActions;
 
   /// When set, shows a 1-based track number instead of the artwork
   /// thumbnail, and a default cloud/drag-handle trailing row (unless
@@ -36,10 +45,13 @@ class SongTile extends ConsumerWidget {
     final isCurrent = player.currentSong?.id == song.id;
     final isActive = isCurrent && player.isPlaying;
 
+    final canShowActions = showActions && SongActionsSheet.hasActions(song);
+
     return ListTile(
       dense: dense,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       onTap: onTap,
+      onLongPress: canShowActions ? () => SongActionsSheet.show(context, song) : null,
       leading: index != null
           ? SizedBox(
               width: 32,
