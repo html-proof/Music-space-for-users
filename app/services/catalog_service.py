@@ -9,10 +9,15 @@ from app.config.settings import settings
 from app.db.base import is_uuid
 from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
+from app.models.catalog_sync import ALBUM, PRIORITY_BACKGROUND, SONG
 from app.services.catalog_queue import catalog_queue, utcnow
+from app.services.catalog_sync_service import catalog_sync_service
 from app.utils.cache_keys import catalog_languages_key
 
 logger = logging.getLogger("catalog_service")
+
+# Session-scoped buffer of sync jobs to write once the read finishes.
+_SYNC_PENDING_KEY = "catalog_sync_pending"
 
 # GaanaPy's own aiohttp session has a 30s timeout, which is fine for a
 # foreground search but too generous for a home-feed shelf that must still
@@ -257,7 +262,7 @@ class CatalogService:
         return song
 
     async def _queue_gaana_song(self, db: AsyncSession, p: Dict[str, Any]) -> Song:
-        artist_id, artist_ext = await catalog_queue.resolve_id(
+        artist_id, artist_ext, _ = await catalog_queue.resolve_id(
             db, "artist", p["artist_ext_id"], match_name=p["primary_artist"]
         )
         await catalog_queue.enqueue("artist", {
@@ -268,7 +273,7 @@ class CatalogService:
             "image_url": p["artist_image"],
         })
 
-        album_id, album_ext = await catalog_queue.resolve_id(
+        album_id, album_ext, album_is_new = await catalog_queue.resolve_id(
             db, "album", p["album_ext_id"], match_name=p["album_name"]
         )
         await catalog_queue.enqueue("album", {
@@ -281,7 +286,7 @@ class CatalogService:
             "artist_name": p["primary_artist"],
         })
 
-        song_id, song_ext = await catalog_queue.resolve_id(db, "song", p["seokey"])
+        song_id, song_ext, song_is_new = await catalog_queue.resolve_id(db, "song", p["seokey"])
         values = {
             "id": song_id,
             "external_id": song_ext,
@@ -309,7 +314,51 @@ class CatalogService:
         # serialize with a null timestamp.
         song = Song(**values, play_count=0)
         song.created_at = song.updated_at = utcnow()
+
+        # An id that has never existed as a row is the one thing a process
+        # restart could strand: the client holds it, and only this process
+        # knows what it stands for. Record a durable sync job for it so the
+        # worker can fetch and store the entity under that same id even if the
+        # in-memory batch never gets flushed. Buffered, not written here, so a
+        # page of results costs one INSERT rather than twenty.
+        if song_is_new or album_is_new:
+            pending = db.info.setdefault(_SYNC_PENDING_KEY, [])
+            if song_is_new:
+                pending.append({
+                    "entity_type": SONG,
+                    "external_id": song_ext,
+                    "entity_id": song_id,
+                    "priority": PRIORITY_BACKGROUND,
+                })
+            if album_is_new and not p["album_ext_id"].startswith("single-"):
+                # A synthetic "single-<track>" key is not an album on Gaana and
+                # would fail every fetch; real album ids only.
+                pending.append({
+                    "entity_type": ALBUM,
+                    "external_id": album_ext,
+                    "entity_id": album_id,
+                    "priority": PRIORITY_BACKGROUND,
+                })
         return song
+
+    @staticmethod
+    async def register_sync_jobs(db: AsyncSession) -> int:
+        """Persist the sync jobs buffered by `_queue_gaana_song` in this session.
+
+        Called once per catalog read that upserts songs, so the durable record
+        of "these ids exist and still need their rows" is committed before the
+        response goes out.
+        """
+        pending = db.info.pop(_SYNC_PENDING_KEY, None)
+        if not pending or not settings.CATALOG_SYNC_ENABLED:
+            return 0
+        try:
+            return await catalog_sync_service.enqueue_many(db, pending)
+        except Exception:
+            # The catalog read itself must not fail because bookkeeping did.
+            logger.warning("could not register catalog sync jobs", exc_info=True)
+            await db.rollback()
+            return 0
 
     async def get_languages(self) -> List[str]:
         """The languages Gaana actually serves, discovered from Gaana.
@@ -436,6 +485,9 @@ class CatalogService:
                     songs.append(song)
 
         if songs:
+            # Durable record of the ids just handed out, before the response
+            # carrying them leaves.
+            await self.register_sync_jobs(db)
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 
@@ -570,7 +622,9 @@ class CatalogService:
         # Try fetching from Gaana
         raw = await self.gaana.get_track_info([song_id])
         if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], dict) and "seokey" in raw[0]:
-            return await self.upsert_gaana_song(db, raw[0])
+            song = await self.upsert_gaana_song(db, raw[0])
+            await self.register_sync_jobs(db)
+            return song
         return None
 
     async def get_trending(self, db: AsyncSession, language: str = "English", limit: int = 10) -> List[Song]:
@@ -593,6 +647,9 @@ class CatalogService:
                     songs.append(await self.upsert_gaana_song(db, item))
 
         if songs:
+            # Durable record of the ids just handed out, before the response
+            # carrying them leaves.
+            await self.register_sync_jobs(db)
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 
@@ -616,6 +673,9 @@ class CatalogService:
                     songs.append(await self.upsert_gaana_song(db, item))
 
         if songs:
+            # Durable record of the ids just handed out, before the response
+            # carrying them leaves.
+            await self.register_sync_jobs(db)
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 
@@ -642,6 +702,9 @@ class CatalogService:
                     songs.append(song)
 
         if songs:
+            # Durable record of the ids just handed out, before the response
+            # carrying them leaves.
+            await self.register_sync_jobs(db)
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 
@@ -669,6 +732,9 @@ class CatalogService:
                     songs.append(song)
 
         if songs:
+            # Durable record of the ids just handed out, before the response
+            # carrying them leaves.
+            await self.register_sync_jobs(db)
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 

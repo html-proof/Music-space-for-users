@@ -11,7 +11,9 @@ from app.models.history import ListeningHistory
 from app.models.song import Song
 from app.schemas.playback import PlayRequest, PauseRequest, ResumeRequest, SeekRequest, SyncPlaybackRequest, PlaybackEventRequest, RadioStartRequest
 from app.services.cache_service import cache_service
+from app.models.catalog_sync import PRIORITY_NEXT, PRIORITY_PLAYING
 from app.services.catalog_service import catalog_service
+from app.services.catalog_sync_service import catalog_sync_service
 from app.services.history_service import history_service
 from app.services.radio_service import RadioService, DEFAULT_BATCH_SIZE
 from app.utils.cache_keys import playback_state_key, player_channel
@@ -149,6 +151,16 @@ class PlaybackService:
         playback.updated_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(playback)
+
+        # What is playing now, and what plays next, jump the sync queue: those
+        # two are the only tracks whose data the user is about to need, and
+        # they would otherwise wait behind however much background catalog fill
+        # is already queued.
+        upcoming = list(playback.queue or [])[:1]
+        await catalog_sync_service.prioritize_songs(
+            db,
+            [(song.id, PRIORITY_PLAYING)] + [(sid, PRIORITY_NEXT) for sid in upcoming],
+        )
 
         if leaving_station:
             await RadioService.clear_station(user_id)

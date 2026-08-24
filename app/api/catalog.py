@@ -1,9 +1,16 @@
+import logging
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.config.settings import settings
 from app.db.database import get_db
+from app.models.catalog_sync import ALBUM, PRIORITY_REQUESTED
 from app.services.catalog_service import catalog_service
+from app.services.catalog_sync_service import catalog_sync_service
 from app.utils.response import api_response, api_error
+
+logger = logging.getLogger("catalog_api")
 
 router = APIRouter(prefix="/api/catalog", tags=["Catalog & Stream Extraction"])
 
@@ -31,12 +38,37 @@ async def get_gaana_song_info(
 
 @router.get("/albums/info", summary="Retrieve album info with decrypted tracks")
 async def get_gaana_album_info(
-    seokey: str = Query(..., min_length=1, max_length=200)
+    seokey: str = Query(..., min_length=1, max_length=200),
+    db: AsyncSession = Depends(get_db)
 ):
     result = await catalog_service.gaana.get_album_info([seokey], True)
     if isinstance(result, dict) and "error" in result:
         return api_error("NOT_FOUND", result["error"], status_code=404)
+
+    # Opening an album is the request that puts it in the sync queue: the
+    # worker stores the album and queues one job per track, so the album is
+    # mirrored locally whether or not the user plays anything from it. Queued,
+    # not awaited -- the response is already complete without it.
+    if settings.CATALOG_SYNC_ENABLED:
+        try:
+            await catalog_sync_service.enqueue(
+                db, ALBUM, seokey, priority=PRIORITY_REQUESTED
+            )
+        except Exception:
+            logger.warning("could not queue album %s for sync", seokey, exc_info=True)
+            await db.rollback()
     return api_response(result)
+
+
+@router.get("/sync/status", summary="Catalog synchronization queue depth by status")
+async def get_sync_status(db: AsyncSession = Depends(get_db)):
+    """How much catalog work is outstanding.
+
+    Read-only, and deliberately not per-user: the queue is catalog state, the
+    same for everyone. Useful for confirming that unfinished jobs are in fact
+    surviving restarts.
+    """
+    return api_response(await catalog_sync_service.counts_by_status(db))
 
 
 @router.get("/artists/info", summary="Retrieve artist profile and top tracks")

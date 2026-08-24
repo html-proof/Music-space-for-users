@@ -72,11 +72,13 @@ async def lifespan(app: FastAPI):
 
         release_watch_task = asyncio.create_task(release_watch_loop())
 
-    # Drains the catalog write queue and trims the catalog to its album cap.
-    # Unlike the two above this is not optional work that a cron job could take
-    # over: requests hand out ids for rows only this loop writes.
+    # The catalog synchronization cycle: drains the write queue, works the
+    # durable catalog_sync_jobs queue, ages finished jobs out, and trims the
+    # catalog to its album cap. Unlike the two above this is not optional work
+    # a cron job could take over -- requests hand out ids for rows only this
+    # loop writes, and jobs only this loop completes.
     catalog_writer_task = None
-    if settings.CATALOG_WRITE_QUEUE_ENABLED:
+    if settings.CATALOG_WRITE_QUEUE_ENABLED or settings.CATALOG_SYNC_ENABLED:
         import asyncio
         from app.workers.catalog_writer_worker import catalog_writer_loop
 

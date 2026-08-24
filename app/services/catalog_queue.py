@@ -133,8 +133,12 @@ class CatalogWriteQueue:
         external_id: str,
         *,
         match_name: Optional[str] = None,
-    ) -> Tuple[str, str]:
-        """Return `(row_id, canonical_external_id)` for an upstream key.
+    ) -> Tuple[str, str, bool]:
+        """Return `(row_id, canonical_external_id, is_new)` for an upstream key.
+
+        `is_new` is True when no row exists yet and the id was minted here --
+        which is exactly when a durable sync job is needed, because that id has
+        been handed to a client and only this process knows about it.
 
         `canonical_external_id` is the external_id the row actually carries. It
         differs from the one passed in when an existing row was matched by name
@@ -148,7 +152,7 @@ class CatalogWriteQueue:
         key = (kind, external_id)
         if key in self._ids:
             self._ids.move_to_end(key)
-            return self._ids[key], self._canonical.get(key, external_id)
+            return self._ids[key], self._canonical.get(key, external_id), False
 
         where = model.external_id == external_id
         if match_name is not None:
@@ -157,11 +161,22 @@ class CatalogWriteQueue:
         row = (await db.execute(select(model).where(where))).scalars().first()
         if row is not None:
             self._cache_put(kind, external_id, row.id, row.external_id)
-            return row.id, row.external_id
+            return row.id, row.external_id, False
 
         row_id = str(uuid.uuid4())
         self._cache_put(kind, external_id, row_id, external_id)
-        return row_id, external_id
+        return row_id, external_id, True
+
+    def adopt_id(self, kind: str, external_id: str, row_id: str) -> None:
+        """Pin an id that was handed out before this process started.
+
+        A sync job carries the `entity_id` a client is already holding. When
+        the worker re-fetches that entity after a restart, the identity map is
+        empty and `resolve_id` would mint a fresh uuid, leaving the client
+        pointing at a row that never appears. Seeding the map first makes the
+        worker write the row under the id that was promised.
+        """
+        self._cache_put(kind, external_id, row_id, external_id)
 
     # -- enqueue ----------------------------------------------------------
 

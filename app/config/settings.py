@@ -213,6 +213,22 @@ class Settings(BaseSettings):
     # flush pass, except any a user still references (saved album, or a song of
     # theirs that is liked / in a playlist / in history / downloaded).
     CATALOG_MAX_ALBUMS: int = 20000
+
+    # Durable catalog sync queue (catalog_sync_jobs). A job survives restarts
+    # and is only ever removed after it has completed and aged out; unfinished
+    # work is never dropped because a newer request arrived.
+    CATALOG_SYNC_ENABLED: bool = True
+    # Jobs processed per worker pass. The pass is bounded so one cycle cannot
+    # run past the next one, and priority ordering means the urgent work is at
+    # the front of whatever the bound allows.
+    CATALOG_SYNC_BATCH_SIZE: int = 25
+    CATALOG_SYNC_MAX_ATTEMPTS: int = 5
+    # A job still PROCESSING after this long belonged to a worker that died.
+    CATALOG_SYNC_STALE_SECONDS: int = 600
+    # How long a COMPLETED job is kept before being archived, and how long an
+    # archived one is kept before deletion.
+    CATALOG_SYNC_RETENTION_SECONDS: int = 7 * 24 * 60 * 60
+    CATALOG_SYNC_ARCHIVE_SECONDS: int = 30 * 24 * 60 * 60
     # Fraction of each shelf given to unheard songs. Zero makes the feed
     # self-reinforcing: the ranker never sees evidence about songs it scores low.
     ML_EXPLORATION_RATE: float = 0.10

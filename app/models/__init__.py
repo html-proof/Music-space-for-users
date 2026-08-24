@@ -11,6 +11,7 @@ from app.models.lyrics import Lyrics
 from app.models.download import Download
 from app.models.onboarding import OnboardingState
 from app.models.notification import NotificationPreferences, Notification
+from app.models.catalog_sync import CatalogSyncJob
 
 __all__ = [
     "Base",
@@ -39,4 +40,5 @@ __all__ = [
     "OnboardingState",
     "NotificationPreferences",
     "Notification",
+    "CatalogSyncJob",
 ]
