@@ -529,20 +529,24 @@ class RecommendationService:
         if not fallback_languages:
             return
 
-        async def _first_nonempty(fetch) -> List[Song]:
-            for lang in fallback_languages:
-                try:
-                    songs = await fetch(lang)
-                except Exception:
-                    logger.warning("catalog shelf fetch failed for %s", lang, exc_info=True)
-                    songs = []
+        # Every language is tried at once rather than one after another. The
+        # sequential version put up to four upstream round trips end to end on
+        # the critical path of the home feed, and paid for the fallback language
+        # even when the first one was going to work. Concurrently, the fallback
+        # is free -- the extra call overlaps the one it is backing up.
+        requests = [("trending", (lang, SHELF_SIZE)) for lang in fallback_languages]
+        requests += [("new_releases", (lang, SHELF_SIZE)) for lang in fallback_languages]
+        results = await catalog_service.fetch_many(db, requests)
+
+        split = len(fallback_languages)
+
+        def _first_nonempty(songs_per_language: List[List[Song]]) -> List[Song]:
+            for songs in songs_per_language:
                 if songs:
                     return songs
             return []
 
-        trending_songs = await _first_nonempty(
-            lambda lang: catalog_service.get_trending(db, lang, limit=SHELF_SIZE)
-        )
+        trending_songs = _first_nonempty(results[:split])
         if trending_songs:
             categories.append(RecommendationCategoryResponse(
                 id="trending",
@@ -552,9 +556,7 @@ class RecommendationService:
                 items=trending_songs,
             ))
 
-        new_songs = await _first_nonempty(
-            lambda lang: catalog_service.get_new_releases(db, lang, limit=SHELF_SIZE)
-        )
+        new_songs = _first_nonempty(results[split:])
         if new_songs:
             categories.append(RecommendationCategoryResponse(
                 id="new_releases",

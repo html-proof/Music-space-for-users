@@ -1,12 +1,13 @@
 import asyncio
 import logging
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.gaanapy import GaanaPy
 from app.db.base import is_uuid
 from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
+from app.services.catalog_upsert import upsert_tracks
 from app.utils.cache_keys import catalog_languages_key
 
 logger = logging.getLogger("catalog_service")
@@ -85,96 +86,26 @@ class CatalogService:
             await db.flush()
         return album
 
-    async def upsert_gaana_song(self, db: AsyncSession, raw_song: Dict[str, Any]) -> Song:
-        seokey = raw_song.get("seokey") or raw_song.get("track_id") or "unknown-track"
-        title = raw_song.get("title") or raw_song.get("track_title") or "Unknown Title"
-        artist_name = raw_song.get("artists") or raw_song.get("artist") or "Unknown Artist"
-        album_name = raw_song.get("album") or raw_song.get("album_title") or "Single"
-        
-        # Duration parsing
-        try:
-            duration = int(raw_song.get("duration", 0))
-        except (ValueError, TypeError):
-            duration = 0
+    async def upsert_gaana_songs(
+        self, db: AsyncSession, raws: List[Dict[str, Any]]
+    ) -> List[Song]:
+        """Upsert a whole Gaana response in a fixed handful of round trips.
 
-        # Images & Streams
-        images = raw_song.get("images", {}).get("urls", {})
-        thumbnail_url = images.get("large_artwork") or images.get("medium_artwork") or raw_song.get("artwork_large", "")
-        stream_urls = raw_song.get("stream_urls", {}).get("urls", {})
-        audio_url = stream_urls.get("very_high_quality") or stream_urls.get("high_quality") or stream_urls.get("medium_quality") or ""
+        See `app.services.catalog_upsert` for why this is set-at-a-time. The
+        per-song path it replaces issued three SELECTs, a COMMIT and a REFRESH
+        for every single track, which came to ~494 statements and ~100 commits
+        for one cold home feed -- each a round trip to a managed Postgres, and
+        the real reason the feed exceeded the client timeout.
+        """
+        return await upsert_tracks(db, raws)
 
-        # Check existing
-        stmt = select(Song).where(Song.external_id == seokey)
-        res = await db.execute(stmt)
-        song = res.scalar_one_or_none()
-
-        artist = await self.get_or_create_artist(
-            db,
-            name=artist_name.split(",")[0].strip() if artist_name else "Unknown Artist",
-            seokey=raw_song.get("artist_seokeys", "").split(",")[0].strip() if raw_song.get("artist_seokeys") else None,
-            external_id=raw_song.get("artist_ids", "").split(",")[0].strip() if raw_song.get("artist_ids") else None,
-            image_url=raw_song.get("artist_image")
-        )
-
-        album_seokey = raw_song.get("album_seokey")
-        album_ext_id = raw_song.get("album_id") or album_seokey
-        if not album_ext_id:
-            # No real album identifier from Gaana (common for singles), and
-            # get_or_create_album falls back to matching by title when there
-            # is none -- every such track shares the literal title "Single",
-            # which would otherwise merge unrelated singles from every artist
-            # into one shared "Single" album. Keying off this song's own
-            # seokey instead keeps each single its own album, one row per
-            # song rather than one row for the whole catalog.
-            album_ext_id = f"single-{seokey}"
-
-        album = await self.get_or_create_album(
-            db,
-            title=album_name,
-            seokey=album_seokey,
-            external_id=album_ext_id,
-            cover_url=thumbnail_url,
-            artist_id=artist.id,
-            artist_name=artist.name
-        )
-
-        if song:
-            song.title = title
-            song.artist_id = artist.id
-            song.artist_name = artist_name
-            song.album_id = album.id
-            song.album_name = album_name
-            song.duration = duration or song.duration
-            song.thumbnail_url = thumbnail_url or song.thumbnail_url
-            song.audio_url = audio_url or song.audio_url
-            song.stream_urls = stream_urls or song.stream_urls
-            song.language = raw_song.get("language") or song.language
-            song.genre = raw_song.get("genres") or song.genre
-            song.is_explicit = raw_song.get("is_explicit", False)
-        else:
-            song = Song(
-                external_id=seokey,
-                title=title,
-                artist_id=artist.id,
-                artist_name=artist_name,
-                album_id=album.id,
-                album_name=album_name,
-                duration=duration,
-                thumbnail_url=thumbnail_url,
-                audio_url=audio_url,
-                stream_urls=stream_urls,
-                source="gaana",
-                language=raw_song.get("language") or "English",
-                genre=raw_song.get("genres") or "Pop",
-                mood=raw_song.get("mood") or "Chill",
-                is_explicit=raw_song.get("is_explicit", False),
-                play_count=0
-            )
-            db.add(song)
-
-        await db.commit()
-        await db.refresh(song)
-        return song
+    async def upsert_gaana_song(
+        self, db: AsyncSession, raw_song: Dict[str, Any]
+    ) -> Optional[Song]:
+        """One track, for the callers that genuinely have one in hand (a
+        resolved radio seed, a song looked up by id)."""
+        songs = await upsert_tracks(db, [raw_song])
+        return songs[0] if songs else None
 
     async def get_languages(self) -> List[str]:
         """The languages Gaana actually serves, discovered from Gaana.
@@ -288,12 +219,7 @@ class CatalogService:
             logger.warning("song search for %r failed upstream: %s", query, results.get("error"))
             return []
 
-        songs: List[Song] = []
-        if isinstance(results, list):
-            for raw in results:
-                if isinstance(raw, dict) and "seokey" in raw:
-                    song = await self.upsert_gaana_song(db, raw)
-                    songs.append(song)
+        songs = await self.upsert_gaana_songs(db, results if isinstance(results, list) else [])
 
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
@@ -442,11 +368,7 @@ class CatalogService:
         except Exception:
             logger.warning("trending fetch for %s timed out/failed", language, exc_info=True)
             raw = None
-        songs: List[Song] = []
-        if isinstance(raw, list):
-            for item in raw:
-                if isinstance(item, dict) and "seokey" in item:
-                    songs.append(await self.upsert_gaana_song(db, item))
+        songs = await self.upsert_gaana_songs(db, raw if isinstance(raw, list) else [])
 
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
@@ -465,11 +387,8 @@ class CatalogService:
         except Exception:
             logger.warning("new releases fetch for %s timed out/failed", language, exc_info=True)
             raw = None
-        songs: List[Song] = []
-        if isinstance(raw, dict) and "tracks" in raw and isinstance(raw["tracks"], list):
-            for item in raw["tracks"]:
-                if isinstance(item, dict) and "seokey" in item:
-                    songs.append(await self.upsert_gaana_song(db, item))
+        tracks = raw.get("tracks") if isinstance(raw, dict) else None
+        songs = await self.upsert_gaana_songs(db, tracks if isinstance(tracks, list) else [])
 
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
@@ -490,12 +409,7 @@ class CatalogService:
         except Exception:
             logger.warning("artist songs fetch for %s timed out/failed", artist_name_or_id, exc_info=True)
 
-        songs: List[Song] = []
-        if isinstance(results, list):
-            for raw in results:
-                if isinstance(raw, dict) and "seokey" in raw:
-                    song = await self.upsert_gaana_song(db, raw)
-                    songs.append(song)
+        songs = await self.upsert_gaana_songs(db, results if isinstance(results, list) else [])
 
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
@@ -517,16 +431,145 @@ class CatalogService:
         except Exception:
             logger.warning("genre/mood fetch for %s timed out/failed", search_term, exc_info=True)
 
-        songs: List[Song] = []
-        if isinstance(results, list):
-            for raw in results:
-                if isinstance(raw, dict) and "seokey" in raw:
-                    song = await self.upsert_gaana_song(db, raw)
-                    songs.append(song)
+        songs = await self.upsert_gaana_songs(db, results if isinstance(results, list) else [])
 
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
+
+    # ------------------------------------------------------------ fan-out
+
+    async def fetch_many(
+        self, db: AsyncSession, requests: Sequence[Tuple[str, tuple]]
+    ) -> List[List[Song]]:
+        """Run several catalog fetches, doing the network part concurrently.
+
+        Retrieval needs a handful of these per request -- top tracks for three
+        artists, two genres, trending in two languages -- and running them one
+        after another meant the home feed waited for the sum of every upstream
+        round trip.
+
+        They cannot simply be `gather`ed, because each one writes through the
+        same `AsyncSession` and a session is not safe for concurrent use. So the
+        two halves are split: every *network* call is issued at once, and the
+        rows are then written from the results sequentially, one batch each.
+        Cache hits skip the network entirely and are resolved in the same pass.
+
+        `requests` is a sequence of (kind, args); results come back positionally,
+        with an empty list wherever a fetch failed.
+        """
+        planners = {
+            "trending": self._plan_trending,
+            "new_releases": self._plan_new_releases,
+            "artist": self._plan_artist_top_songs,
+            "genre": self._plan_genre_or_mood,
+            "search": self._plan_search,
+        }
+
+        plans = []
+        for kind, args in requests:
+            planner = planners.get(kind)
+            plans.append(None if planner is None else planner(*args))
+
+        # Phase 1: cache lookups and network calls, all at once.
+        fetched = await asyncio.gather(
+            *[
+                plan["fetch"]() if plan else _none()
+                for plan in plans
+            ],
+            return_exceptions=True,
+        )
+
+        # Phase 2: writes, sequentially, through the one session.
+        out: List[List[Song]] = []
+        for plan, result in zip(plans, fetched):
+            if plan is None or isinstance(result, BaseException):
+                if isinstance(result, BaseException):
+                    logger.warning("catalog fetch failed: %s", result)
+                out.append([])
+                continue
+            try:
+                out.append(await plan["resolve"](db, result))
+            except Exception:
+                logger.warning("catalog upsert failed", exc_info=True)
+                out.append([])
+        return out
+
+    def _plan(self, cache_key: str, fetch_raw, extract):
+        """One fetch, split into its network half and its database half."""
+
+        async def fetch():
+            cached = await cache_service.get_json(cache_key)
+            if cached:
+                return {"cached": cached}
+            try:
+                return {"raw": await asyncio.wait_for(
+                    fetch_raw(), timeout=TRENDING_FETCH_TIMEOUT_SECONDS
+                )}
+            except Exception:
+                logger.warning("upstream fetch for %s failed", cache_key, exc_info=True)
+                return {"raw": None}
+
+        async def resolve(db: AsyncSession, result: dict) -> List[Song]:
+            if "cached" in result:
+                return await self.cached_songs(db, result["cached"])
+            songs = await self.upsert_gaana_songs(db, extract(result.get("raw")))
+            if songs:
+                await cache_service.set_json(
+                    cache_key, [s.id for s in songs], ttl_seconds=1800
+                )
+            return songs
+
+        return {"fetch": fetch, "resolve": resolve}
+
+    @staticmethod
+    def _as_list(raw) -> List[Dict[str, Any]]:
+        return raw if isinstance(raw, list) else []
+
+    @staticmethod
+    def _as_tracks(raw) -> List[Dict[str, Any]]:
+        tracks = raw.get("tracks") if isinstance(raw, dict) else None
+        return tracks if isinstance(tracks, list) else []
+
+    def _plan_trending(self, language: str, limit: int):
+        return self._plan(
+            f"catalog:trending:{language}:{limit}",
+            lambda: self.gaana.get_trending(language, limit),
+            self._as_list,
+        )
+
+    def _plan_new_releases(self, language: str, limit: int):
+        return self._plan(
+            f"catalog:newreleases:{language}:{limit}",
+            lambda: self.gaana.get_new_releases(language, limit),
+            self._as_tracks,
+        )
+
+    def _plan_artist_top_songs(self, artist: str, limit: int):
+        return self._plan(
+            f"catalog:artist_songs:{artist}:{limit}",
+            lambda: self.gaana.search_songs(artist, limit),
+            self._as_list,
+        )
+
+    def _plan_genre_or_mood(self, query: str, language: Optional[str], limit: int):
+        term = f"{query} {language}".strip() if language else query
+        return self._plan(
+            f"catalog:genre_mood:{term}:{limit}",
+            lambda: self.gaana.search_songs(term, limit),
+            self._as_list,
+        )
+
+    def _plan_search(self, query: str, limit: int):
+        return self._plan(
+            f"search:songs:{query}:{limit}",
+            lambda: self.gaana.search_songs(query, limit),
+            self._as_list,
+        )
+
+
+async def _none():
+    return None
 
 
 catalog_service = CatalogService()
