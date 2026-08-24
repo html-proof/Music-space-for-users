@@ -134,6 +134,34 @@ def field_lexical_score(query: str, value: Optional[str]) -> float:
     return 0.55 * covered if covered > 0 else 0.0
 
 
+def credited_artists(credit: Optional[str]) -> List[str]:
+    """Split one of Gaana comma-joined credit strings into individual artists."""
+    return [part.strip() for part in (credit or "").split(",") if part.strip()]
+
+
+def artist_lexical_score(query: str, credit: Optional[str]) -> float:
+    """Lexical match against a *credit list*, scored per artist.
+
+    `artist_name` is not one name, it is every name on the track:
+    "Amaal Mallik, Arijit Singh, Rashmi Virag". Matching the query against that
+    whole string asks the wrong question -- it scores how much of the credit the
+    query accounts for, so a search for "arijit singh" scored 1.00 for a solo
+    track, 0.50 with one collaborator and 0.19 with five. Every one of those
+    songs is equally by Arijit Singh; the ranking just punished him for
+    collaborating, and buried the results Gaana had ranked highest.
+
+    Taking the best per-artist score asks the question the user meant: is this
+    song by the artist I typed?
+    """
+    artists = credited_artists(credit)
+    if not artists:
+        return 0.0
+    best = max(field_lexical_score(query, artist) for artist in artists)
+    # A multi-artist query ("arijit singh shreya ghoshal") should also be able to
+    # match the credit as a whole, which per-artist scoring alone cannot see.
+    return max(best, field_lexical_score(query, credit))
+
+
 def lexical_score(query: str, song: Any) -> float:
     """Best-field lexical relevance, with a small bonus for matching two fields.
 
@@ -143,7 +171,7 @@ def lexical_score(query: str, song: Any) -> float:
     query shape ("dua lipa levitating"), which is common enough to be worth it.
     """
     title = field_lexical_score(query, getattr(song, "title", None))
-    artist = field_lexical_score(query, getattr(song, "artist_name", None))
+    artist = artist_lexical_score(query, getattr(song, "artist_name", None))
     album = field_lexical_score(query, getattr(song, "album_name", None))
 
     best = max(title, artist, album)
@@ -158,6 +186,8 @@ class SearchResult:
     lexical: float
     personal: float
     popularity: float
+    # Position this result held in the upstream response; 0 is best.
+    upstream_rank: int = 0
 
     @property
     def song_id(self) -> str:
@@ -178,9 +208,16 @@ def personal_score(song: Any, state: Optional[UserState], song_vec: Any = None) 
     vec = song_vec if song_vec is not None else song_vector(song)
     content = max(0.0, linalg.cosine(state.taste_vector, vec)) if state.taste_vector is not None else 0.0
 
-    artist = _norm(getattr(song, "artist_name", None))
+    # Affinity is keyed by individual artist, but `artist_name` holds the whole
+    # credit list, so a straight lookup missed every collaboration: a user who
+    # plays Arijit Singh constantly got no affinity credit for a track billed
+    # "Mithoon, Arijit Singh". Score against the strongest credited artist.
     peak = max(state.artist_affinity.values(), default=0.0) or 1.0
-    artist_affinity = max(0.0, min(state.artist_affinity.get(artist, 0.0) / peak, 1.0))
+    affinities = [
+        state.artist_affinity.get(_norm(name), 0.0)
+        for name in credited_artists(getattr(song, "artist_name", None))
+    ] or [0.0]
+    artist_affinity = max(0.0, min(max(affinities) / peak, 1.0))
 
     song_id = str(getattr(song, "id", "") or "")
     liked = 1.0 if song_id in state.liked_song_ids else 0.0
@@ -203,30 +240,49 @@ def rank(
     max_play_count: int = 1,
     min_lexical: float = 0.0,
 ) -> List[SearchResult]:
-    """Re-rank search results by lexical relevance, personalization and popularity.
+    """Re-rank search results by lexical relevance, personalization and the order
+    Gaana returned them in.
 
-    Order within the returned list is stable for equal scores (by title), so
-    identical queries do not shuffle results between requests.
+    `songs` must arrive in upstream order, because that order is itself a signal
+    and is the last thing standing when the lexical scores tie -- which they do
+    constantly. A query like "arijit singh" matches the artist field of every
+    result exactly, so a dozen results score 1.00 and nothing else separates
+    them; the same happens for every track on one album when the query names the
+    album. This used to be settled by sorting on *title*, alphabetically, which
+    silently discarded Gaana ranking and put "Bekhayali" above "Humdard" for no
+    reason a user could perceive.
+
+    Our own `play_count` cannot fill that gap: it counts plays in *this* app, so
+    it is 0 for every row that was just fetched, which is all of them on a cold
+    search. Gaana position is the only popularity signal actually available at
+    that moment.
     """
     q = _norm(query)
     results: List[SearchResult] = []
     max_play = max(int(max_play_count or 1), 1)
 
-    for song in songs:
+    for position, song in enumerate(songs):
         lex = lexical_score(q, song) if q else 0.0
         if q and lex <= min_lexical:
             continue
         vec = song_vector(song)
         per = personal_score(song, state, song_vec=vec)
         pop = math.log1p(int(getattr(song, "play_count", 0) or 0)) / math.log1p(max_play)
+        upstream = max(0.0, 1.0 - position / config.SEARCH_UPSTREAM_HORIZON)
         score = (
             config.SEARCH_LEXICAL_WEIGHT * lex
             + config.SEARCH_PERSONAL_WEIGHT * per
             + config.SEARCH_POPULARITY_WEIGHT * pop
+            + config.SEARCH_UPSTREAM_WEIGHT * upstream
         )
-        results.append(SearchResult(song=song, score=score, lexical=lex, personal=per, popularity=pop))
+        results.append(SearchResult(
+            song=song, score=score, lexical=lex, personal=per,
+            popularity=pop, upstream_rank=position,
+        ))
 
-    results.sort(key=lambda r: (-r.score, _norm(getattr(r.song, "title", ""))))
+    # Ties fall back to upstream order, never to alphabetical: equal scores mean
+    # we have nothing to add, and Gaana does.
+    results.sort(key=lambda r: (-r.score, r.upstream_rank))
     return results[:limit] if limit else results
 
 

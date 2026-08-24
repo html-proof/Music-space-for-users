@@ -159,6 +159,25 @@ CANDIDATE_SOURCES = ("content", "cf", "artist_genre", "popular", "playlist")
 SEARCH_LEXICAL_WEIGHT = 3.0
 SEARCH_PERSONAL_WEIGHT = 1.0
 SEARCH_POPULARITY_WEIGHT = 0.35
+# Weight on the position Gaana itself returned a result in.
+#
+# Bounded so it can never outrank a real difference in relevance. The narrowest
+# gap between two lexical tiers that actually means something -- an exact title
+# (1.00) against a track that merely shares its album (~0.92) -- is worth
+# 3.0 * 0.08 = 0.24 of score, so the prior must be able to move a result by
+# strictly less than that across its whole range.
+#
+# What it does settle is ties and near-ties, which are the common case: a query
+# naming an artist scores 1.00 for every result, and a query naming an album
+# scores ~0.88 for every track on it. There the prior is all the information
+# there is, and it beats the alphabetical sort that used to decide.
+SEARCH_UPSTREAM_WEIGHT = 0.18
+# Positions beyond this contribute no prior at all. A fixed horizon rather than
+# a normalized one so the prior means the same thing regardless of how many
+# results came back -- normalizing over the response length made it *steeper*
+# for a short response, which is backwards: fewer results is less evidence about
+# rank, not more, and it let a three-result response reorder genuine relevance.
+SEARCH_UPSTREAM_HORIZON = 10
 
 # Serving cache TTLs (seconds).
 TASTE_VECTOR_TTL = 900

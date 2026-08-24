@@ -60,9 +60,12 @@ FETCH_BUDGET_SECONDS = 18.0
 MAX_ARTIST_FETCHES = 3
 MAX_GENRE_FETCHES = 2
 MAX_LANGUAGE_FETCHES = 2
-# Per-entity fetch size. Over-fetching here is cheap (one call either way) and
-# gives the ranker something to actually choose between.
-PER_FETCH_LIMIT = 20
+# Per-entity fetch size. Not cheap, despite looking like one call: Gaana search
+# returns seokeys only, so the client fetches details for every track it names,
+# one request each. This number is therefore a multiplier on upstream load, not
+# a page size. Twelve keeps every shelf (of SHELF_SIZE=10) full with room for
+# the ranker to choose, while costing ~40% fewer upstream requests than 20 did.
+PER_FETCH_LIMIT = 12
 
 
 class _Budget:
@@ -140,36 +143,31 @@ async def _from_artist_genre(
     The highest-precision source: the user either told us these artists
     (onboarding) or demonstrated them (plays and likes), and Gaana is asked for
     their current catalog rather than for whatever we happened to ingest once.
+
+    All of these go out in one concurrent batch. Issued one at a time, five
+    upstream round trips landed end to end on the critical path of the home
+    feed, which is most of what made it slow.
     """
     from app.services.catalog_service import catalog_service
+
+    if budget.spent():
+        return
 
     artists = _preferred(state.artist_affinity, state.favorite_artists, MAX_ARTIST_FETCHES)
     genres = _preferred(state.genre_affinity, state.favorite_genres, MAX_GENRE_FETCHES)
     languages = _preferred(state.language_affinity, state.preferred_languages, 1)
     language = languages[0] if languages else None
+    if not artists and not genres:
+        return
+
+    requests = [("artist", (artist, PER_FETCH_LIMIT)) for artist in artists]
+    requests += [("genre", (genre, language, PER_FETCH_LIMIT)) for genre in genres]
 
     added = 0
-    for artist in artists:
-        if budget.spent() or added >= cap:
-            return
-        for song in await _fetch(
-            lambda a=artist: catalog_service.get_artist_top_songs(db, a, limit=PER_FETCH_LIMIT),
-            "artist:%s" % artist,
-        ):
-            if str(song.id) in exclude:
-                continue
-            cand.add(song, "artist_genre")
-            added += 1
-
-    for genre in genres:
-        if budget.spent() or added >= cap:
-            return
-        for song in await _fetch(
-            lambda g=genre: catalog_service.get_genre_or_mood_songs(
-                db, g, language, limit=PER_FETCH_LIMIT
-            ),
-            "genre:%s" % genre,
-        ):
+    for songs in await catalog_service.fetch_many(db, requests):
+        for song in songs:
+            if added >= cap:
+                return
             if str(song.id) in exclude:
                 continue
             cand.add(song, "artist_genre")
@@ -205,14 +203,10 @@ async def _from_content(
 
     pool: List[Any] = list(cand.songs.values())
     if terms and not budget.spent():
-        pool.extend(
-            await _fetch(
-                lambda t=terms[0]: catalog_service.get_genre_or_mood_songs(
-                    db, t, language, limit=PER_FETCH_LIMIT
-                ),
-                "content:%s" % terms[0],
-            )
+        fetched = await catalog_service.fetch_many(
+            db, [("genre", (terms[0], language, PER_FETCH_LIMIT))]
         )
+        pool.extend(fetched[0] if fetched else [])
 
     scored: List[Tuple[float, Any, Any]] = []
     seen: Set[str] = set()
@@ -242,9 +236,12 @@ async def _from_popular(
     Unconditional: this is what makes the candidate set non-empty for a user
     with no history at all, and -- unlike the popularity scan it replaces -- it
     reflects what is charting on Gaana right now rather than the play counts
-    accumulated in our own database.
+    accumulated in our own database. Trending and new releases go out together.
     """
     from app.services.catalog_service import catalog_service
+
+    if budget.spent():
+        return
 
     languages = _preferred(
         state.language_affinity, state.preferred_languages, MAX_LANGUAGE_FETCHES
@@ -257,29 +254,18 @@ async def _from_popular(
     if not languages:
         return
 
+    requests = [("trending", (language, PER_FETCH_LIMIT)) for language in languages]
+    requests.append(("new_releases", (languages[0], PER_FETCH_LIMIT)))
+
     added = 0
-    for language in languages:
-        if budget.spent() or added >= cap:
-            return
-        for song in await _fetch(
-            lambda l=language: catalog_service.get_trending(db, l, limit=PER_FETCH_LIMIT),
-            "trending:%s" % language,
-        ):
+    for songs in await catalog_service.fetch_many(db, requests):
+        for song in songs:
+            if added >= cap:
+                return
             if str(song.id) in exclude:
                 continue
             cand.add(song, "popular")
             added += 1
-
-    if budget.spent() or added >= cap:
-        return
-    for song in await _fetch(
-        lambda: catalog_service.get_new_releases(db, languages[0], limit=PER_FETCH_LIMIT),
-        "newreleases:%s" % languages[0],
-    ):
-        if str(song.id) in exclude:
-            continue
-        cand.add(song, "popular")
-        added += 1
 
 
 async def _from_cf(
@@ -464,25 +450,18 @@ async def for_seed_song(
                 cand.add(song, "cf")
                 cand.cf_scores[str(song.id)] = sim_by_id.get(str(song.id), 0.0) / peak
 
-    pool: List[Any] = []
+    requests = []
     artist_name = (getattr(seed, "artist_name", "") or "").strip()
-    if artist_name and not budget.spent():
-        pool.extend(
-            await _fetch(
-                lambda: catalog_service.get_artist_top_songs(db, artist_name, limit=PER_FETCH_LIMIT),
-                "seed-artist:%s" % artist_name,
-            )
-        )
+    if artist_name:
+        requests.append(("artist", (artist_name, PER_FETCH_LIMIT)))
     genre = (getattr(seed, "genre", "") or "").strip()
-    if genre and not budget.spent():
-        pool.extend(
-            await _fetch(
-                lambda: catalog_service.get_genre_or_mood_songs(
-                    db, genre, getattr(seed, "language", None), limit=PER_FETCH_LIMIT
-                ),
-                "seed-genre:%s" % genre,
-            )
-        )
+    if genre:
+        requests.append(("genre", (genre, getattr(seed, "language", None), PER_FETCH_LIMIT)))
+
+    pool: List[Any] = []
+    if requests and not budget.spent():
+        for songs in await catalog_service.fetch_many(db, requests):
+            pool.extend(songs)
 
     scored: List[Tuple[float, Any, Any]] = []
     seen: Set[str] = set()
