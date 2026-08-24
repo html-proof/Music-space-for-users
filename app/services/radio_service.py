@@ -92,13 +92,21 @@ class RadioService:
             artist = await RadioService._find_artist(db, value)
             if artist:
                 return artist.id
-            # No artist row, but the name may still be credited on songs -- that
-            # is how multi-artist credit strings arrive. _artist_songs matches on
-            # the name in that case, so the raw value is a usable seed.
-            res = await db.execute(
-                select(Song.id).where(Song.artist_name.ilike(f"%{value}%")).limit(1)
-            )
-            return value if res.scalars().first() else None
+            # No local artist row -- which only means the user has never
+            # followed or picked this artist, not that the artist is unknown.
+            # Ask Gaana whether the name resolves to anything before accepting
+            # it, so a typo still gets SEED_NOT_FOUND rather than an empty
+            # station. This used to be `SELECT ... FROM songs WHERE artist_name
+            # ILIKE`, which rejected every artist our own ingest had not
+            # happened to cover. `get_artist_top_songs` caches, so the
+            # `_artist_songs` call that follows is a cache hit, not a second
+            # round trip.
+            try:
+                probe = await catalog_service.get_artist_top_songs(db, value, limit=1)
+            except Exception:
+                logger.warning("artist seed probe for %s failed", value, exc_info=True)
+                return None
+            return value if probe else None
         return None
 
     @staticmethod
@@ -222,14 +230,19 @@ class RadioService:
 
     @staticmethod
     async def _artist_songs(db: AsyncSession, seed_id: str, limit: int) -> List[Song]:
+        """The artist current catalog, from Gaana.
+
+        The local `artists` row (if any) supplies the display name to query
+        with -- it records that the user follows this artist, which is user
+        data. The tracks themselves are never read out of `songs`, which
+        previously capped an artist station at whatever we had ingested for
+        them and ordered it by our own play counts.
+        """
         artist = await RadioService._find_artist(db, seed_id)
-        if artist:
-            conditions = [Song.artist_id == artist.id, Song.artist_name.ilike(f"%{artist.name}%")]
-        else:
-            conditions = [Song.artist_name.ilike(f"%{seed_id}%")]
-        stmt = select(Song).where(or_(*conditions)).order_by(Song.play_count.desc()).limit(limit)
-        res = await db.execute(stmt)
-        return list(res.scalars().all())
+        name = (artist.name if artist else seed_id) or ""
+        if not name.strip():
+            return []
+        return list(await catalog_service.get_artist_top_songs(db, name.strip(), limit=limit))
 
     @staticmethod
     async def _personalized_songs(db: AsyncSession, user_id: str, limit: int) -> List[Song]:
@@ -296,37 +309,82 @@ class RadioService:
 
     @staticmethod
     async def _heuristic_personalized_songs(db: AsyncSession, user_id: str, limit: int) -> List[Song]:
+        """Non-ML personalized pool: the user top artists and genres, fetched
+        from Gaana.
+
+        The affinities come from Postgres -- history, likes, and the artists and
+        languages picked at onboarding -- and are used purely as *query terms*.
+        This used to be `WHERE genre IN (...) OR artist_name IN (...) ORDER BY
+        play_count`, which could only ever return rows already sitting in our
+        database, so the same station repeated indefinitely.
+        """
         affinities = await RecommendationService.calculate_user_affinities(db, user_id)
-        conditions = []
-        if affinities["top_genres"]:
-            conditions.append(Song.genre.in_(affinities["top_genres"][:3]))
-        if affinities["top_artists"]:
-            conditions.append(Song.artist_name.in_(affinities["top_artists"][:5]))
-        if affinities["top_moods"]:
-            conditions.append(Song.mood.in_(affinities["top_moods"][:3]))
-        if not conditions:
-            # No history yet: the padding step supplies the whole batch.
-            return []
-        stmt = select(Song).where(or_(*conditions)).order_by(Song.play_count.desc()).limit(limit)
-        res = await db.execute(stmt)
-        return list(res.scalars().all())
+        languages = affinities.get("top_languages") or []
+        language = languages[0] if languages else None
+
+        songs: List[Song] = []
+        seen: Set[str] = set()
+
+        async def take(fetch, what: str) -> None:
+            if len(songs) >= limit:
+                return
+            try:
+                fetched = await fetch()
+            except Exception:
+                logger.warning("radio pool fetch (%s) failed; continuing", what, exc_info=True)
+                return
+            for song in fetched:
+                if str(song.id) in seen:
+                    continue
+                seen.add(str(song.id))
+                songs.append(song)
+
+        for artist in (affinities.get("top_artists") or [])[:3]:
+            await take(
+                lambda a=artist: catalog_service.get_artist_top_songs(db, a, limit=limit),
+                "artist:%s" % artist,
+            )
+        for genre in (affinities.get("top_genres") or [])[:2]:
+            await take(
+                lambda g=genre: catalog_service.get_genre_or_mood_songs(
+                    db, g, language, limit=limit
+                ),
+                "genre:%s" % genre,
+            )
+        for mood in (affinities.get("top_moods") or [])[:1]:
+            await take(
+                lambda m=mood: catalog_service.get_genre_or_mood_songs(
+                    db, m, language, limit=limit
+                ),
+                "mood:%s" % mood,
+            )
+
+        return songs[:limit]
 
     @staticmethod
     async def _padding(db: AsyncSession, limit: int, allow_network: bool) -> List[Song]:
         """
-        Last resort so a station never comes back empty. Only an explicit start
-        may go upstream for this; autoplay stays local.
-        """
-        songs: List[Song] = []
-        if allow_network:
-            try:
-                songs = list(await catalog_service.get_trending(db, limit=limit))
-            except Exception as e:
-                logger.warning(f"Radio padding from trending failed: {e}")
+        Last resort so a station does not come back empty: whatever is trending
+        on Gaana right now.
 
-        stmt = select(Song).order_by(Song.play_count.desc()).limit(limit * 2)
-        res = await db.execute(stmt)
-        return songs + list(res.scalars().all())
+        `allow_network` no longer gates this. It used to, with a
+        `SELECT ... ORDER BY play_count` behind it for the autoplay case -- the
+        point being that pressing skip should never wait on Gaana. That fallback
+        was the database acting as a catalog, and it made every station converge
+        on the same locally-popular rows. `catalog_service.get_trending` caches
+        each language for 30 minutes, so the refill a skip triggers is served
+        from cache in the overwhelming majority of cases; when it genuinely is
+        not, an empty batch (and a retry) is the honest outcome.
+        """
+        # Over-fetch: everything the station has already served is filtered out
+        # of this list afterwards, so asking for exactly `limit` reliably yields
+        # nothing once a listener is a batch or two deep. The old DB query took
+        # `limit * 2` for the same reason.
+        try:
+            return list(await catalog_service.get_trending(db, limit=limit * 3))
+        except Exception as e:
+            logger.warning(f"Radio padding from trending failed: {e}")
+            return []
 
     # --------------------------------------------------------------- upstream
 

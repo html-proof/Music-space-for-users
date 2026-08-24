@@ -7,6 +7,7 @@ from api.gaanapy import GaanaPy
 from app.db.base import is_uuid
 from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
+from app.utils.cache_keys import catalog_languages_key
 
 logger = logging.getLogger("catalog_service")
 
@@ -18,6 +19,28 @@ logger = logging.getLogger("catalog_service")
 # Gaana falls back to whatever is already cached in Postgres quickly instead
 # of stalling the whole response.
 TRENDING_FETCH_TIMEOUT_SECONDS = 8.0
+
+# How much of Gaana chart listing to read when discovering languages. The
+# endpoint tops out around 130 charts however much is asked for; this is
+# comfortably above that so the discovered set is the whole listing rather than
+# a popularity-truncated slice of it (which would silently drop the smaller
+# languages -- exactly the ones a hardcoded list also gets wrong).
+LANGUAGE_DISCOVERY_CHART_LIMIT = 500
+# Which languages Gaana curates charts for changes on the order of months.
+LANGUAGE_CACHE_TTL_SECONDS = 6 * 60 * 60
+
+# Every read method below returns *only* what Gaana served for this request (or
+# a still-valid cached copy of a recent Gaana response). None of them falls back
+# to a `select(Song)` scan any more.
+#
+# The old fallbacks made Postgres a second, silently-authoritative music
+# catalog: when Gaana was slow or a language had no coverage, the shelf quietly
+# filled up with whatever rows happened to have been ingested earlier, so the
+# feed was really being served from the database. Songs rows are still written
+# here, but strictly as a by-product -- they exist to give a Gaana track a
+# stable local id that likes/history/playlists can reference, and are never a
+# retrieval source. An empty list is the honest answer when Gaana has nothing;
+# the caller turns that into an empty/retry state.
 
 
 class CatalogService:
@@ -153,21 +176,117 @@ class CatalogService:
         await db.refresh(song)
         return song
 
+    async def get_languages(self) -> List[str]:
+        """The languages Gaana actually serves, discovered from Gaana.
+
+        There is no "list languages" endpoint, but the top-charts listing is
+        one: Gaana curates charts per language and stamps each with the
+        language it belongs to, so the distinct set across the whole listing is
+        Gaana own answer to the question. Ordered by how many charts each has,
+        which is Gaana own signal for how much catalog sits behind it.
+
+        This replaced two earlier answers, both wrong in the same way. First
+        `SELECT DISTINCT language FROM songs`, which made the onboarding screen
+        a function of what had been ingested -- empty on a fresh deployment.
+        Then a hardcoded list in config, which was a preset: the names were
+        ours, not Gaana, and nothing kept them true.
+
+        Returns `[]` when Gaana is unreachable. The caller surfaces that as an
+        empty/retry state rather than substituting a default list.
+        """
+        cached = await cache_service.get_json(catalog_languages_key())
+        if isinstance(cached, list) and cached:
+            return [str(name) for name in cached]
+
+        try:
+            charts = await asyncio.wait_for(
+                self.gaana.get_charts(LANGUAGE_DISCOVERY_CHART_LIMIT),
+                timeout=TRENDING_FETCH_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("language discovery via charts failed", exc_info=True)
+            return []
+
+        if not isinstance(charts, list):
+            logger.warning("language discovery: charts unavailable upstream")
+            return []
+
+        counts: Dict[str, int] = {}
+        for chart in charts:
+            if not isinstance(chart, dict):
+                continue
+            # A chart may be stamped with several languages ("Tamil,Kannada,
+            # Telugu,Malayalam" is a real one), which is a listing of languages,
+            # not a language.
+            for part in str(chart.get("language") or "").split(","):
+                name = part.strip()
+                if name:
+                    counts[name] = counts.get(name, 0) + 1
+
+        if not counts:
+            return []
+
+        languages = [
+            name for name, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        await cache_service.set_json(
+            catalog_languages_key(), languages, ttl_seconds=LANGUAGE_CACHE_TTL_SECONDS
+        )
+        return languages
+
+    async def default_languages(self, limit: int = 2) -> List[str]:
+        """Which languages to query for a user who has stated no preference.
+
+        Gaana own ordering, not ours: `get_languages` ranks by how many charts
+        Gaana curates per language, so this is "whatever Gaana has most of"
+        rather than a house default. The call sites here used to hardcode
+        "English" (or "Hindi, English"), which quietly made the cold-start feed
+        a product decision baked into the source.
+
+        Empty when Gaana is unreachable, which leaves the feed empty rather than
+        populated with something nobody asked for.
+        """
+        return (await self.get_languages())[:limit]
+
+    async def resolve_language(self, name: Optional[str]) -> Optional[str]:
+        """Gaana own spelling of `name`, or None if Gaana does not serve it.
+
+        Case- and whitespace-insensitive, so a client sending "malayalam" still
+        resolves. Returning None is what stops arbitrary client input from being
+        stored as a preference and later sent upstream as a language.
+        """
+        if not name:
+            return None
+        wanted = name.strip().lower()
+        for known in await self.get_languages():
+            if known.lower() == wanted:
+                return known
+        return None
+
+    async def cached_songs(self, db: AsyncSession, cached_ids: list) -> List[Song]:
+        """Rehydrate a cached Gaana result, preserving Gaana's ordering.
+
+        The cache stores ids, not rows, so the songs have to be read back by
+        primary key -- `IN (...)` returns them in whatever order Postgres
+        likes, which silently discarded the ranking Gaana sent (the whole
+        point of a "trending" shelf). Reordering here restores it.
+        """
+        if not cached_ids:
+            return []
+        rows = (await db.execute(select(Song).where(Song.id.in_(cached_ids)))).scalars().all()
+        by_id = {str(row.id): row for row in rows}
+        return [by_id[str(sid)] for sid in cached_ids if str(sid) in by_id]
+
     async def search_songs(self, db: AsyncSession, query: str, limit: int = 10) -> List[Song]:
         cache_key = f"search:songs:{query}:{limit}"
         cached = await cache_service.get_json(cache_key)
         if cached:
-            # Look up by IDs in database
-            stmt = select(Song).where(Song.id.in_(cached))
-            res = await db.execute(stmt)
-            return list(res.scalars().all())
+            return await self.cached_songs(db, cached)
 
         results = await self.gaana.search_songs(query, limit)
         if isinstance(results, dict) and "error" in results:
-            # Fallback to local DB search
-            stmt = select(Song).where(or_(Song.title.ilike(f"%{query}%"), Song.artist_name.ilike(f"%{query}%"))).limit(limit)
-            res = await db.execute(stmt)
-            return list(res.scalars().all())
+            logger.warning("song search for %r failed upstream: %s", query, results.get("error"))
+            return []
 
         songs: List[Song] = []
         if isinstance(results, list):
@@ -195,7 +314,8 @@ class CatalogService:
 
         results = await self.gaana.search_albums(query, limit)
         if not isinstance(results, list):
-            return await self._local_albums(db, query, limit)
+            logger.warning("album search for %r unavailable upstream", query)
+            return []
 
         albums: List[Album] = []
         for raw in results:
@@ -203,19 +323,12 @@ class CatalogService:
                 albums.append(await self._upsert_gaana_album(db, raw))
 
         if not albums:
-            return await self._local_albums(db, query, limit)
+            return []
 
         # get_or_create_* only flush; commit so the rows outlive this request.
         await db.commit()
         await cache_service.set_json(cache_key, [a.id for a in albums], ttl_seconds=1800)
         return albums
-
-    async def _local_albums(self, db: AsyncSession, query: str, limit: int) -> List[Album]:
-        stmt = select(Album).where(
-            or_(Album.title.ilike(f"%{query}%"), Album.artist_name.ilike(f"%{query}%"))
-        ).limit(limit)
-        res = await db.execute(stmt)
-        return list(res.scalars().all())
 
     async def _upsert_gaana_album(self, db: AsyncSession, raw: Dict[str, Any]) -> Album:
         images = (raw.get("images") or {}).get("urls") or {}
@@ -266,7 +379,8 @@ class CatalogService:
 
         results = await self.gaana.search_artists(query, limit)
         if not isinstance(results, list):
-            return await self._local_artists(db, query, limit)
+            logger.warning("artist search for %r unavailable upstream", query)
+            return []
 
         artists: List[Artist] = []
         for raw in results:
@@ -289,16 +403,11 @@ class CatalogService:
                 artists.append(artist)
 
         if not artists:
-            return await self._local_artists(db, query, limit)
+            return []
 
         await db.commit()
         await cache_service.set_json(cache_key, [a.id for a in artists], ttl_seconds=1800)
         return artists
-
-    async def _local_artists(self, db: AsyncSession, query: str, limit: int) -> List[Artist]:
-        stmt = select(Artist).where(Artist.name.ilike(f"%{query}%")).limit(limit)
-        res = await db.execute(stmt)
-        return list(res.scalars().all())
 
     async def get_song_by_id(self, db: AsyncSession, song_id: str) -> Optional[Song]:
         # song_id is either one of our own UUIDs or a Gaana seokey such as
@@ -324,9 +433,7 @@ class CatalogService:
         cache_key = f"catalog:trending:{language}:{limit}"
         cached = await cache_service.get_json(cache_key)
         if cached:
-            stmt = select(Song).where(Song.id.in_(cached))
-            res = await db.execute(stmt)
-            return list(res.scalars().all())
+            return await self.cached_songs(db, cached)
 
         try:
             raw = await asyncio.wait_for(
@@ -341,11 +448,6 @@ class CatalogService:
                 if isinstance(item, dict) and "seokey" in item:
                     songs.append(await self.upsert_gaana_song(db, item))
 
-        if not songs:
-            stmt = select(Song).where(Song.language == language).order_by(Song.play_count.desc()).limit(limit)
-            res = await db.execute(stmt)
-            songs = list(res.scalars().all())
-
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
@@ -354,9 +456,7 @@ class CatalogService:
         cache_key = f"catalog:newreleases:{language}:{limit}"
         cached = await cache_service.get_json(cache_key)
         if cached:
-            stmt = select(Song).where(Song.id.in_(cached))
-            res = await db.execute(stmt)
-            return list(res.scalars().all())
+            return await self.cached_songs(db, cached)
 
         try:
             raw = await asyncio.wait_for(
@@ -371,11 +471,6 @@ class CatalogService:
                 if isinstance(item, dict) and "seokey" in item:
                     songs.append(await self.upsert_gaana_song(db, item))
 
-        if not songs:
-            stmt = select(Song).where(Song.language == language).order_by(Song.created_at.desc()).limit(limit)
-            res = await db.execute(stmt)
-            songs = list(res.scalars().all())
-
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
@@ -384,9 +479,7 @@ class CatalogService:
         cache_key = f"catalog:artist_songs:{artist_name_or_id}:{limit}"
         cached = await cache_service.get_json(cache_key)
         if cached:
-            stmt = select(Song).where(Song.id.in_(cached))
-            res = await db.execute(stmt)
-            return list(res.scalars().all())
+            return await self.cached_songs(db, cached)
 
         results = None
         try:
@@ -404,11 +497,6 @@ class CatalogService:
                     song = await self.upsert_gaana_song(db, raw)
                     songs.append(song)
 
-        if not songs:
-            stmt = select(Song).where(Song.artist_name.ilike(f"%{artist_name_or_id}%")).order_by(Song.play_count.desc()).limit(limit)
-            res = await db.execute(stmt)
-            songs = list(res.scalars().all())
-
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
@@ -418,9 +506,7 @@ class CatalogService:
         cache_key = f"catalog:genre_mood:{search_term}:{limit}"
         cached = await cache_service.get_json(cache_key)
         if cached:
-            stmt = select(Song).where(Song.id.in_(cached))
-            res = await db.execute(stmt)
-            return list(res.scalars().all())
+            return await self.cached_songs(db, cached)
 
         results = None
         try:
@@ -437,11 +523,6 @@ class CatalogService:
                 if isinstance(raw, dict) and "seokey" in raw:
                     song = await self.upsert_gaana_song(db, raw)
                     songs.append(song)
-
-        if not songs:
-            stmt = select(Song).where(or_(Song.genre.ilike(f"%{query}%"), Song.mood.ilike(f"%{query}%"))).order_by(Song.play_count.desc()).limit(limit)
-            res = await db.execute(stmt)
-            songs = list(res.scalars().all())
 
         if songs:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)

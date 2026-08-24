@@ -1,8 +1,13 @@
 """
 Search across tracks, albums and artists.
 
-Upstream is stubbed in every test: the point is our own mapping, caching and
-fallback behaviour, not Gaana's availability.
+Gaana is stubbed in every test: the point is our own mapping and caching, not
+Gaana's availability.
+
+There is no local-catalogue fallback to test any more. Search retrieval is
+Gaana and only Gaana -- when it is unreachable the endpoint returns an empty
+success rather than serving whatever rows happen to be in `songs`/`albums`,
+which used to make results a view of our own ingest.
 """
 import pytest
 from httpx import AsyncClient
@@ -30,6 +35,24 @@ GAANA_ALBUM = {
     "images": {"urls": {"large_artwork": "https://img/large.jpg"}},
 }
 
+GAANA_SONG = {
+    "seokey": "one-more-time",
+    "track_id": "5678",
+    "title": "One More Time",
+    "artists": "Daft Punk",
+    "artist_seokeys": "daft-punk",
+    "artist_ids": "9001",
+    "album": "Discovery",
+    "album_seokey": "discovery",
+    "album_id": "1234",
+    "duration": "320",
+    "language": "English",
+    "genres": "Electronic",
+    "is_explicit": False,
+    "images": {"urls": {"large_artwork": "https://img/large.jpg"}},
+    "stream_urls": {"urls": {"high_quality": "https://stream/hq.mp4"}},
+}
+
 GAANA_ARTIST = {
     "seokey": "daft-punk",
     "artist_id": "9001",
@@ -50,7 +73,7 @@ def stub_upstream(monkeypatch):
         return [GAANA_ARTIST]
 
     async def songs(*args, **kwargs):
-        return NO_RESULTS
+        return [GAANA_SONG]
 
     monkeypatch.setattr(catalog_service.gaana, "search_albums", albums)
     monkeypatch.setattr(catalog_service.gaana, "search_artists", artists)
@@ -68,6 +91,11 @@ def upstream_down(monkeypatch):
 
 
 async def seed_local(db: AsyncSession):
+    """Rows that match the query but never came from this request Gaana call.
+
+    Used to assert they are *not* returned: they stand in for a previously
+    ingested catalog, which search must no longer read from.
+    """
     artist = Artist(external_id="local-artist", name="Local Legend", seokey="local-legend")
     db.add(artist)
     await db.commit()
@@ -232,37 +260,48 @@ async def test_type_is_recorded_on_the_search_history_row(
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_search_falls_back_to_the_local_catalogue(
+async def test_unreachable_gaana_is_an_empty_success_not_local_rows(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession, upstream_down
 ):
-    """An unreachable Gaana must degrade to what we already hold, not error."""
+    """When Gaana is down, search returns nothing -- it must not fall back to
+    the database.
+
+    Rows matching this exact query are seeded first, so the assertion is
+    specifically that they are ignored. Serving them would make search a view
+    of whatever had previously been ingested rather than of Gaana, and would do
+    it silently: the client cannot tell a degraded result from a real one.
+    """
     await seed_local(db_session)
 
     res = await client.get("/api/search?query=Local+Legend", headers=auth_headers)
     assert res.status_code == 200, res.text
     data = res.json()["data"]
 
-    assert [s["title"] for s in data["songs"]] == ["Local Legend Anthem"]
-    assert [a["title"] for a in data["albums"]] == ["Local Legend Live"]
-    assert [a["name"] for a in data["artists"]] == ["Local Legend"]
+    assert data["songs"] == []
+    assert data["albums"] == []
+    assert data["artists"] == []
+    assert data["total"] == 0
 
 
 @pytest.mark.asyncio
-async def test_local_album_fallback_matches_on_artist_name(
-    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, upstream_down
+async def test_local_rows_never_widen_a_successful_gaana_search(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, stub_upstream
 ):
-    artist, album, _ = await seed_local(db_session)
-    other = Album(
-        external_id="other-album",
-        title="Something Else",
-        artist_name="Local Legend",
-    )
-    db_session.add(other)
-    await db_session.commit()
+    """A song already in the database that matches the query, but that Gaana did
+    not return, must not be merged into the results.
 
-    res = await client.get("/api/search?query=Local+Legend&type=album", headers=auth_headers)
-    titles = {a["title"] for a in res.json()["data"]["albums"]}
-    assert titles == {"Local Legend Live", "Something Else"}
+    Local lexical matches used to be added to the ranking pool "for recall".
+    That quietly reintroduced the database as a second source: two users
+    searching the same term got different results depending on what each
+    deployment had ingested.
+    """
+    await seed_local(db_session)
+
+    res = await client.get("/api/search?query=Local+Legend&type=track", headers=auth_headers)
+    assert res.status_code == 200, res.text
+    titles = [s["title"] for s in res.json()["data"]["songs"]]
+    assert titles == ["One More Time"]  # only what the stub returned
+    assert "Local Legend Anthem" not in titles
 
 
 @pytest.mark.asyncio

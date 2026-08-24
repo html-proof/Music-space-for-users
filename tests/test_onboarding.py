@@ -1,7 +1,7 @@
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.song import Artist, Song
+from app.models.song import Artist
 
 
 async def seed_artists(db: AsyncSession):
@@ -15,38 +15,30 @@ async def seed_artists(db: AsyncSession):
     return a1, a2
 
 
-async def seed_artists_with_language_songs(db: AsyncSession):
-    """Two artists, each with a song in a different language."""
-    a_en = Artist(external_id="art-lang-en", name="English Artist", song_count=1)
-    a_ml = Artist(external_id="art-lang-ml", name="Malayalam Artist", song_count=1)
-    db.add(a_en)
-    db.add(a_ml)
-    await db.commit()
-    await db.refresh(a_en)
-    await db.refresh(a_ml)
-
-    db.add(Song(
-        external_id="song-lang-en", title="English Song", artist_id=a_en.id,
-        artist_name=a_en.name, language="English", duration=180,
-    ))
-    db.add(Song(
-        external_id="song-lang-ml", title="Malayalam Song", artist_id=a_ml.id,
-        artist_name=a_ml.name, language="Malayalam", duration=180,
-    ))
-    await db.commit()
-    return a_en, a_ml
+#: Languages the stubbed Gaana serves, shaped like the chart records
+#: `catalog_service.get_languages` discovers them from. The multi-language entry
+#: is real: Gaana stamps some charts with a comma-joined list.
+CHART_LANGUAGES = ("Malayalam", "Tamil", "English", "Tamil,Kannada")
 
 
-async def seed_languages(db: AsyncSession):
-    """Languages are derived from the songs catalog, not a seeded table --
-    this stands in for songs having actually been ingested in those
-    languages."""
-    db.add_all([
-        Song(external_id="lang-seed-en", title="Seed Song EN", language="English", duration=180),
-        Song(external_id="lang-seed-ml", title="Seed Song ML", language="Malayalam", duration=180),
-        Song(external_id="lang-seed-ta", title="Seed Song TA", language="Tamil", duration=180),
-    ])
-    await db.commit()
+def stub_languages(monkeypatch, languages=CHART_LANGUAGES):
+    """Make Gaana chart listing report `languages`.
+
+    Selectable languages used to be `SELECT DISTINCT language FROM songs`, so
+    every test touching the language screen first had to write songs; then they
+    were a hardcoded config list, so no stub was needed at all. They are now
+    discovered from Gaana own top-charts listing, which is what this stands in
+    for -- nothing about the local database affects the result.
+    """
+    from app.services.catalog_service import catalog_service
+
+    async def get_charts(limit, *args, **kwargs):
+        return [
+            {"seokey": f"chart-{i}", "title": f"Chart {i}", "language": language}
+            for i, language in enumerate(languages)
+        ]
+
+    monkeypatch.setattr(catalog_service.gaana, "get_charts", get_charts)
 
 
 @pytest.mark.asyncio
@@ -69,17 +61,47 @@ async def test_status_defaults_to_incomplete(client: AsyncClient, auth_headers: 
 
 
 @pytest.mark.asyncio
-async def test_get_languages_catalog(client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
-    await seed_languages(db_session)
+async def test_get_languages_comes_from_gaana_not_the_songs_table(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    """The language screen offers what Gaana serves, on a completely empty
+    database.
+
+    Two regressions in one: the list used to be derived from ingested songs (so
+    a fresh deployment offered nothing and onboarding was unusable until some
+    other request warmed the catalog up), and then from a hardcoded config list
+    (so the names were ours, and nothing kept them true). A comma-joined chart
+    is split, because that is a listing of languages rather than a language.
+    """
+    stub_languages(monkeypatch)
+
     res = await client.get("/api/onboarding/languages", headers=auth_headers)
     assert res.status_code == 200
     names = {lang["name"] for lang in res.json()["data"]}
-    assert names == {"English", "Malayalam", "Tamil"}
+    assert names == {"Malayalam", "Tamil", "English", "Kannada"}
 
 
 @pytest.mark.asyncio
-async def test_set_languages(client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
-    await seed_languages(db_session)
+async def test_get_languages_is_empty_when_gaana_is_unreachable(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+):
+    """No default list to fall back on.
+
+    Gaana is unreachable (the suite default), so the screen gets nothing and
+    shows a retry. Substituting a canned set of languages here is what would
+    make the app look populated when it is not -- and would let a user pick a
+    language this backend cannot actually serve content for.
+    """
+    res = await client.get("/api/onboarding/languages", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_set_languages(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    stub_languages(monkeypatch)
     res = await client.post(
         "/api/onboarding/languages", json={"languages": ["Malayalam", "Tamil"]}, headers=auth_headers
     )
@@ -98,9 +120,10 @@ async def test_set_languages_requires_nonempty_list(client: AsyncClient, auth_he
 
 @pytest.mark.asyncio
 async def test_set_languages_rejects_unknown_language(
-    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
-    await seed_languages(db_session)
+    """Rejected because Gaana does not serve it, not because we have no rows."""
+    stub_languages(monkeypatch)
     res = await client.post(
         "/api/onboarding/languages", json={"languages": ["Klingon"]}, headers=auth_headers
     )
@@ -110,9 +133,9 @@ async def test_set_languages_rejects_unknown_language(
 
 @pytest.mark.asyncio
 async def test_set_languages_filters_unknown_and_keeps_valid(
-    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
-    await seed_languages(db_session)
+    stub_languages(monkeypatch)
     res = await client.post(
         "/api/onboarding/languages", json={"languages": ["malayalam", "Klingon"]}, headers=auth_headers
     )
@@ -122,37 +145,72 @@ async def test_set_languages_filters_unknown_and_keeps_valid(
 
 
 @pytest.mark.asyncio
-async def test_get_suggested_artists(client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
-    # limit == seeded count so the thin-catalog fallback (a real network call
-    # to catalog_service.gaana.get_trending) never triggers in this test.
-    a1, a2 = await seed_artists(db_session)
-    res = await client.get("/api/onboarding/artists/suggestions?limit=2", headers=auth_headers)
+async def test_get_suggested_artists_come_from_gaana_not_the_artists_table(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
+    """Suggestions are Gaana artists, even when the local `artists` table has
+    rows that would previously have won.
+
+    The old implementation led with `SELECT ... FROM artists ORDER BY
+    song_count`, so the grid showed whatever earlier requests had written --
+    and once that table filled up, Gaana was never consulted at all.
+    """
+    from app.services.catalog_service import catalog_service
+
+    await seed_artists(db_session)  # Daft Punk / Justice: must NOT be suggested
+
+    async def fake_get_trending(language, limit):
+        return [_raw_trending_track(language)]
+
+    async def fake_search_artists(name, limit):
+        return [{"name": name, "images": {"urls": {}}}]
+
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "search_artists", fake_search_artists)
+    # No language chosen yet, so the screen asks Gaana which languages it has
+    # most of rather than assuming a pair.
+    stub_languages(monkeypatch, ("Hindi", "English"))
+
+    res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
-    data = res.json()["data"]
-    names = [a["name"] for a in data]
-    # Ranked by song_count desc.
-    assert names[:2] == ["Daft Punk", "Justice"]
+    names = {a["name"] for a in res.json()["data"]}
+    assert names == {"Fallback Artist Hindi", "Fallback Artist English"}
+    assert "Daft Punk" not in names and "Justice" not in names
 
 
 @pytest.mark.asyncio
-async def test_get_suggested_artists_biased_by_preferred_language(
-    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+async def test_get_suggested_artists_queries_gaana_for_the_chosen_language(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
-    """Onboarding is language-then-artists: by the time this screen loads,
-    the user's language choice is already saved and should drive which
-    artists show up first, not a fixed default."""
-    await seed_languages(db_session)
-    a_en, a_ml = await seed_artists_with_language_songs(db_session)
+    """Onboarding is language-then-artists: the language the user just saved
+    must be the language this screen asks Gaana about.
+
+    The preference is read from Postgres (user data); the artists come back
+    from Gaana for exactly that language.
+    """
+    from app.services.catalog_service import catalog_service
+
+    asked = []
+
+    async def fake_get_trending(language, limit):
+        asked.append(language)
+        return [_raw_trending_track(language)]
+
+    async def fake_search_artists(name, limit):
+        return [{"name": name, "images": {"urls": {}}}]
+
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "search_artists", fake_search_artists)
+    stub_languages(monkeypatch)
 
     await client.post(
         "/api/onboarding/languages", json={"languages": ["Malayalam"]}, headers=auth_headers
     )
 
-    res = await client.get("/api/onboarding/artists/suggestions?limit=1", headers=auth_headers)
+    res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
-    data = res.json()["data"]
-    assert len(data) == 1
-    assert data[0]["name"] == "Malayalam Artist"
+    assert asked == ["Malayalam"]
+    assert [a["name"] for a in res.json()["data"]] == ["Fallback Artist Malayalam"]
 
 
 def _raw_trending_track(language: str) -> dict:
@@ -173,13 +231,13 @@ def _raw_trending_track(language: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_get_suggested_artists_falls_back_when_catalog_thin(
+async def test_get_suggested_artists_carries_seokey_and_backfilled_image(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
     """Only the raw Gaana network call is mocked (not catalog_service.get_trending
     as a whole) -- get_suggested_artists deliberately calls the raw client
-    itself and does its own upsert, so that a timeout only ever cancels the
-    network leg, never a live DB commit. See onboarding_service.py."""
+    itself and persists nothing, so that a timeout only ever cancels the
+    network leg. See onboarding_service.py."""
     from app.services.catalog_service import catalog_service
 
     async def fake_get_trending(language, limit):
@@ -190,6 +248,7 @@ async def test_get_suggested_artists_falls_back_when_catalog_thin(
 
     monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
     monkeypatch.setattr(catalog_service.gaana, "search_artists", fake_search_artists)
+    stub_languages(monkeypatch, ("Hindi", "English"))
 
     res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
@@ -223,6 +282,7 @@ async def test_get_suggested_artists_image_backfill_is_bounded_and_fault_toleran
 
     monkeypatch.setattr(catalog_service.gaana, "get_trending", fake_get_trending)
     monkeypatch.setattr(catalog_service.gaana, "search_artists", failing_search_artists)
+    stub_languages(monkeypatch, ("Hindi", "English"))
 
     res = await client.get("/api/onboarding/artists/suggestions?limit=20", headers=auth_headers)
     assert res.status_code == 200
@@ -312,9 +372,11 @@ async def test_set_artists_skips_unknown_ids(client: AsyncClient, auth_headers: 
 
 
 @pytest.mark.asyncio
-async def test_complete_flow(client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
+async def test_complete_flow(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
     a1, _ = await seed_artists(db_session)
-    await seed_languages(db_session)
+    stub_languages(monkeypatch)
 
     await client.post("/api/onboarding/languages", json={"languages": ["English"]}, headers=auth_headers)
     await client.post(

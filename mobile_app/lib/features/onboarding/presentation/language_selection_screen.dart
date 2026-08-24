@@ -48,10 +48,13 @@ class _LanguageSelectionScreenState extends ConsumerState<LanguageSelectionScree
               value: languages,
               onRetry: () => ref.invalidate(onboardingLanguagesProvider),
               data: (options) {
-                // A genuinely empty catalog is expected on a fresh/thin
-                // backend -- languages are derived from songs actually
-                // ingested, not a maintained list, so there is nothing fake
-                // to show here instead.
+                // The list is discovered from Gaana, so empty means Gaana is
+                // unreachable -- not that a catalog is "still filling up",
+                // which is what this said back when languages came from
+                // whatever songs had been ingested. Offer a retry and let the
+                // user through; showing a canned list of languages instead
+                // would be exactly the preset content this screen avoids, and
+                // would let them pick one nothing can be fetched for.
                 if (options.isEmpty) {
                   return Center(
                     child: Padding(
@@ -59,12 +62,17 @@ class _LanguageSelectionScreenState extends ConsumerState<LanguageSelectionScree
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.language, color: AppColors.textSecondary, size: 40),
+                          const Icon(Icons.cloud_off, color: AppColors.textSecondary, size: 40),
                           const SizedBox(height: 12),
                           const Text(
-                            'No languages available yet -- the music catalog is still filling up. You can continue and pick one later.',
+                            'We could not reach the music catalog just now. Retry, or continue and pick your languages later.',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: AppColors.textSecondary),
+                          ),
+                          const SizedBox(height: 16),
+                          OutlinedButton(
+                            onPressed: () => ref.invalidate(onboardingLanguagesProvider),
+                            child: const Text('Retry'),
                           ),
                         ],
                       ),

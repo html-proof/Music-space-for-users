@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import is_uuid
 from app.models.onboarding import OnboardingState
-from app.models.song import Artist, Song as SongModel
+from app.models.song import Artist
 from app.services.cache_service import cache_service
 from app.services.catalog_service import catalog_service
 from app.services.library_service import library_service
@@ -90,103 +90,73 @@ class OnboardingService:
 
     @staticmethod
     async def get_languages(db: AsyncSession) -> List[str]:
-        """Selectable languages, derived from what is actually in the catalog.
+        """The languages onboarding offers, discovered from Gaana.
 
-        Not a maintained/seeded list: Gaana exposes no endpoint that returns
-        valid language names, so the only honest source is what has actually
-        been ingested into `songs` from real search/browse/trending calls. A
-        freshly deployed or just-cleared catalog legitimately has none yet --
-        the onboarding screen is expected to show an empty state and let the
-        user skip, not fall back to a hardcoded list.
+        Neither derived from our own `songs` rows nor hardcoded: see
+        `catalog_service.get_languages`. Comes back empty only when Gaana is
+        unreachable, which the client shows as a retry rather than a default
+        list.
         """
-        stmt = (
-            select(SongModel.language)
-            .where(SongModel.language.isnot(None), SongModel.language != "")
-            .distinct()
-            .order_by(SongModel.language)
-        )
-        return [row[0] for row in (await db.execute(stmt)).all()]
+        return await catalog_service.get_languages()
 
     @staticmethod
     async def get_suggested_artists(
         db: AsyncSession, user_id: Optional[str] = None, limit: int = 30
-    ) -> List["Artist | SuggestedArtist"]:
+    ) -> List["SuggestedArtist"]:
         """Artists to show on the onboarding artist-selection screen.
 
-        Backed by the real catalog (ranked by song_count) rather than a
-        hardcoded list, and -- when `user_id` is given -- biased toward
-        whatever the user just picked on the language-selection screen right
-        before this one: onboarding is language-then-artists, so by the time
-        this runs `preferred_languages` is already saved and is exactly the
-        signal this screen should use instead of a fixed default.
+        Every suggestion comes from Gaana, for the languages the user picked on
+        the previous screen (onboarding is language-then-artists, so
+        `preferred_languages` is already saved by the time this runs).
 
-        On a freshly deployed, still-empty catalog this falls back to pulling
-        trending songs for those languages (or English/Hindi if the user has
-        none saved yet) purely to read their artist fields -- nothing is
-        written to the database here. There are far more artists on Gaana
-        than this screen will ever need to persist, and most of a 30-artist
-        grid is never selected, so writing all of them (plus their songs and
-        albums) on every fetch is pure waste. An artist is only ever
-        persisted once the user actually picks it, in `set_artists`.
+        This used to lead with `SELECT ... FROM artists ORDER BY song_count`,
+        falling back to Gaana only when the local table was too thin. That made
+        the grid a view of our own ingest: it surfaced whichever artists earlier
+        requests had happened to write, in an order driven by our row counts
+        rather than by what Gaana actually has for that language -- and once the
+        table filled up, the Gaana path stopped running at all.
+
+        Nothing is written to the database here. A 30-artist grid is mostly
+        never selected, and persisting all of it (plus songs and albums) on
+        every fetch is pure write amplification; an artist is persisted only
+        when the user actually picks one, in `set_artists`.
         """
         preferred_languages: List[str] = []
         if user_id and is_uuid(user_id):
             pref = await UserService.get_preferences(db, user_id)
             preferred_languages = [lang for lang in (pref.preferred_languages or []) if lang]
 
-        fallback_languages = preferred_languages or ["English", "Hindi"]
+        # No language chosen yet (the user skipped, or is revisiting the
+        # screen). Which languages to show artists for is Gaana's call, not
+        # ours: `default_languages` returns the ones it curates the most charts
+        # for. Hardcoding "Hindi, English" here made the suggestion grid a
+        # product decision rather than a reflection of the catalog.
+        languages = preferred_languages or await catalog_service.default_languages(2)
+        if not languages:
+            return []
 
-        stmt = (
-            select(Artist)
-            .join(SongModel, SongModel.artist_id == Artist.id)
-            .where(Artist.song_count > 0, SongModel.language.in_(preferred_languages))
-            .distinct()
-            .order_by(Artist.song_count.desc(), Artist.album_count.desc())
-            .limit(limit)
-        ) if preferred_languages else None
-
-        artists: List[Artist] = []
-        if stmt is not None:
-            artists = list((await db.execute(stmt)).scalars().all())
-
-        if len(artists) < min(limit, 10):
-            # No language saved yet, or too few artists match it -- fall back
-            # to the unfiltered top-artists ranking rather than showing (or
-            # padding out) a near-empty screen.
-            seen_ids = {a.id for a in artists}
-            fallback_stmt = (
-                select(Artist)
-                .where(Artist.song_count > 0)
-                .order_by(Artist.song_count.desc(), Artist.album_count.desc())
-                .limit(limit)
-            )
-            for artist in (await db.execute(fallback_stmt)).scalars().all():
-                if artist.id not in seen_ids:
-                    artists.append(artist)
-                    seen_ids.add(artist.id)
-
-        if len(artists) >= min(limit, 10):
-            return artists[:limit]
-
-        seen = {a.id for a in artists}
-        seen_names = {a.name.strip().lower() for a in artists if a.name}
-        # No DB writes in this loop at all -- just reading artist fields off
-        # the raw Gaana response -- so the only real cost per language is one
-        # network call, which is why this can stay tightly time-boxed.
-        deadline = time.monotonic() + 12.0
+        seen_ids: set = set()
+        seen_names: set = set()
         stubs: List[SuggestedArtist] = []
-        for language in fallback_languages:
-            if len(artists) + len(stubs) >= limit or time.monotonic() >= deadline:
+        deadline = time.monotonic() + 12.0
+
+        for language in languages:
+            if len(stubs) >= limit or time.monotonic() >= deadline:
                 break
             try:
-                raw = await asyncio.wait_for(catalog_service.gaana.get_trending(language, 20), timeout=4.0)
+                raw = await asyncio.wait_for(
+                    catalog_service.gaana.get_trending(language, 20), timeout=4.0
+                )
             except Exception:
-                logger.warning("onboarding artist suggestions: get_trending(%s) unavailable, skipping", language)
+                logger.warning(
+                    "onboarding artist suggestions: get_trending(%s) unavailable, skipping",
+                    language,
+                )
                 continue
             if not isinstance(raw, list):
                 continue
             for item in raw:
-                if len(artists) + len(stubs) >= limit:
+                if len(stubs) >= limit:
                     break
                 if not isinstance(item, dict):
                     continue
@@ -194,16 +164,16 @@ class OnboardingService:
                 if not stub:
                     continue
                 key = stub.name.strip().lower()
-                if stub.id in seen or key in seen_names:
+                if stub.id in seen_ids or key in seen_names:
                     continue
-                seen.add(stub.id)
+                seen_ids.add(stub.id)
                 seen_names.add(key)
                 stubs.append(stub)
 
         if stubs:
             await OnboardingService._backfill_stub_images(stubs)
 
-        return (artists + stubs)[:limit]
+        return stubs[:limit]
 
     # A trending track's own payload often omits `artist_image`; Gaana's
     # artist search usually has one anyway. Bounded separately from the stub
@@ -244,18 +214,20 @@ class OnboardingService:
 
     @staticmethod
     async def set_languages(db: AsyncSession, user_id: str, languages: List[str]) -> dict:
-        """Stores only languages present in the catalog (case-insensitive
-        match), never whatever raw strings a client happens to send -- the
-        catalog is the source of truth the client is supposed to have picked
-        from in the first place."""
-        catalog = await OnboardingService.get_languages(db)
-        catalog_by_lower = {name.lower(): name for name in catalog}
+        """Stores only languages this service actually knows how to query Gaana
+        for (case-insensitive match), never whatever raw strings a client
+        happens to send.
 
+        Validated against the same Gaana-discovered list `get_languages` served
+        the client, rather than against whatever is in the songs table -- a
+        language with no local rows yet is a perfectly valid choice, since its
+        songs are fetched from Gaana on demand.
+        """
         valid: List[str] = []
         for lang in languages:
-            canonical = catalog_by_lower.get((lang or "").strip().lower())
-            if canonical and canonical not in valid:
-                valid.append(canonical)
+            resolved = await catalog_service.resolve_language(lang)
+            if resolved and resolved not in valid:
+                valid.append(resolved)
 
         if not valid:
             raise ValueError("No valid languages selected. Choose from GET /api/onboarding/languages.")

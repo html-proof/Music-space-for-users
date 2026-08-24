@@ -37,6 +37,44 @@ async def seed_songs(db: AsyncSession, n: int = 3):
     return songs
 
 
+def serve_upstream(monkeypatch, songs):
+    """Make Gaana serve the given seeded rows.
+
+    Autoplay continues a session out of Gaana, not out of `songs`, so a test
+    that needs a track to autoplay *to* has to put one upstream. Payloads are
+    keyed by the same seokey, so the upsert resolves to the row already seeded
+    and the ids the test asserts on stay stable.
+    """
+    from app.services.catalog_service import catalog_service
+
+    tracks = [
+        {
+            "seokey": song.external_id,
+            "track_id": song.external_id,
+            "title": song.title,
+            "artists": song.artist_name,
+            "album": "Single",
+            "duration": str(song.duration or 0),
+            "language": "English",
+            "genres": "Pop",
+            "is_explicit": False,
+            "images": {"urls": {}},
+            "stream_urls": {"urls": {}},
+        }
+        for song in songs
+    ]
+
+    async def listed(*args, **kwargs):
+        return list(tracks)
+
+    async def released(*args, **kwargs):
+        return {"tracks": list(tracks)}
+
+    for method in ("search_songs", "get_trending", "get_track_info"):
+        monkeypatch.setattr(catalog_service.gaana, method, listed)
+    monkeypatch.setattr(catalog_service.gaana, "get_new_releases", released)
+
+
 # --------------------------------------------------------------------------
 # Authentication bypass
 # --------------------------------------------------------------------------
@@ -522,10 +560,11 @@ def test_zero_duration_does_not_divide_by_zero():
 
 @pytest.mark.asyncio
 async def test_next_advances_and_persists_the_shrinking_queue(
-    client: AsyncClient, auth_headers: dict, db_session: AsyncSession
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
     """The queue was mutated in place, so the JSON column never went dirty."""
     songs = await seed_songs(db_session, 3)
+    serve_upstream(monkeypatch, songs)
     await client.post(
         "/api/player/play",
         json={"song_id": songs[0].id, "device_id": "d1", "queue": [songs[1].id, songs[2].id]},
@@ -555,7 +594,13 @@ async def test_next_advances_and_persists_the_shrinking_queue(
 async def test_next_stops_when_there_is_nothing_left_to_autoplay(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession
 ):
-    """Autoplay must not invent a track: one song in the catalogue means stop."""
+    """Autoplay must not invent a track.
+
+    Gaana is unreachable here (the suite default), and the row sitting in
+    `songs` must not be pressed into service as a continuation -- autoplay used
+    to fall back to a `select(Song)` scan, which is what made every station
+    converge on the same locally-popular handful of tracks.
+    """
     songs = await seed_songs(db_session, 1)
     await client.post(
         "/api/player/play",
