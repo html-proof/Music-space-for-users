@@ -35,6 +35,29 @@ def clean_rate_limit_buckets():
 
 
 @pytest.fixture(autouse=True)
+def offline_gaana(monkeypatch):
+    """No test reaches the real Gaana.
+
+    Every music read now goes upstream -- there is no local-catalogue fallback
+    left to absorb it -- so without this, a test that does not stub Gaana makes
+    a live network call, and its result depends on what is charting today.
+
+    The stub is installed at `_safe_request`, the single choke point every
+    endpoint in `api/gaanapy.py` funnels through, and returns the library own
+    no-results shape. Tests that stub a higher-level method
+    (`catalog_service.gaana.get_trending`, ...) still override it, and a test
+    that stubs nothing gets a deterministic "Gaana is unreachable" -- which is
+    exactly the condition several of them mean to assert.
+    """
+    from app.services.catalog_service import catalog_service
+
+    async def unreachable(*args, **kwargs):
+        return {"error": "no results found"}
+
+    monkeypatch.setattr(catalog_service.gaana, "_safe_request", unreachable)
+
+
+@pytest.fixture(autouse=True)
 def clean_cache():
     """
     With REDIS_ENABLED off, cache_service falls back to a dict on the singleton.

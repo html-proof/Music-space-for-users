@@ -72,13 +72,6 @@ async def lifespan(app: FastAPI):
 
         release_watch_task = asyncio.create_task(release_watch_loop())
 
-    catalog_warmup_task = None
-    if settings.CATALOG_WARMUP_ENABLED:
-        import asyncio
-        from app.workers.catalog_warmup import catalog_warmup_loop
-
-        catalog_warmup_task = asyncio.create_task(catalog_warmup_loop())
-
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
@@ -86,8 +79,6 @@ async def lifespan(app: FastAPI):
         trainer_task.cancel()
     if release_watch_task:
         release_watch_task.cancel()
-    if catalog_warmup_task:
-        catalog_warmup_task.cancel()
     await player_pubsub.stop()
     await cache_service.close()
     await catalog_service.close()

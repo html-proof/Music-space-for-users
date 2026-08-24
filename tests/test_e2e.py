@@ -56,9 +56,55 @@ async def seed_e2e_music_database(db: AsyncSession):
     return (song1, song2, song3), (album1, album2), (artist1, artist2)
 
 
+def serve_upstream(monkeypatch, songs):
+    """Put the seeded tracks on Gaana.
+
+    Search retrieval is Gaana-only, so seeding the database is no longer enough
+    to make a query return anything. Payloads reuse each row seokey, so the
+    upsert resolves to the row already seeded and the rest of the lifecycle
+    (playback, likes, playlists) keeps operating on the same ids.
+    """
+    from app.services.catalog_service import catalog_service
+
+    tracks = [
+        {
+            "seokey": song.external_id,
+            "track_id": song.external_id,
+            "title": song.title,
+            "artists": song.artist_name,
+            "album": song.album_name or "Single",
+            "duration": str(song.duration or 0),
+            "language": song.language or "English",
+            "genres": song.genre or "",
+            "is_explicit": False,
+            "images": {"urls": {}},
+            "stream_urls": {"urls": {}},
+        }
+        for song in songs
+    ]
+
+    async def search_songs(query, limit=10, *args, **kwargs):
+        tokens = [t for t in (query or "").lower().split() if t]
+        matched = [
+            t for t in tracks
+            if any(
+                token in " ".join(
+                    str(t.get(f) or "") for f in ("title", "artists", "album", "genres")
+                ).lower()
+                for token in tokens
+            )
+        ]
+        return matched[:limit] or {"error": "no results found"}
+
+    monkeypatch.setattr(catalog_service.gaana, "search_songs", search_songs)
+
+
 @pytest.mark.asyncio
-async def test_complete_e2e_spotify_lifecycle(client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
+async def test_complete_e2e_spotify_lifecycle(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
+):
     songs, albums, artists = await seed_e2e_music_database(db_session)
+    serve_upstream(monkeypatch, songs)
     s1, s2, s3 = songs
     alb1, alb2 = albums
     art1, art2 = artists

@@ -26,6 +26,21 @@ class HomeScreen extends ConsumerWidget {
             value: feed,
             onRetry: () => ref.invalidate(homeFeedProvider),
             data: (data) {
+              // Every shelf is fetched live from Gaana, so "no shelves" is a
+              // real outcome (Gaana unreachable, or nothing for this user's
+              // languages) rather than an impossible one -- the server no
+              // longer pads the feed out of the local database. Show the same
+              // retry affordance the error branch does instead of a page that
+              // is blank under the greeting.
+              final hasContent = data.topMix.isNotEmpty ||
+                  data.categories.any((category) => category.items.isNotEmpty);
+              if (!hasContent) {
+                return _EmptyFeed(
+                  greeting: data.greeting,
+                  onRetry: () => ref.read(homeFeedProvider.notifier).refresh(),
+                );
+              }
+
               // The hero spotlights whatever the feed considers the strongest
               // pick for this user: the top of the personalized mix, or the
               // first item of the first shelf if there is no mix yet.
@@ -47,6 +62,41 @@ class HomeScreen extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Shown when the feed came back with nothing in it.
+///
+/// Scrollable on purpose: it is the child of a RefreshIndicator, which only
+/// arms itself over a scrollable, so pull-to-refresh keeps working here -- the
+/// one gesture most likely to fix the situation.
+class _EmptyFeed extends StatelessWidget {
+  const _EmptyFeed({required this.greeting, required this.onRetry});
+
+  final String greeting;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        _HomeHeader(greeting: greeting),
+        const SizedBox(height: 64),
+        const Icon(Icons.cloud_off, color: AppColors.textSecondary, size: 40),
+        const SizedBox(height: 12),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 32),
+          child: Text(
+            'We could not load recommendations right now.\nPull down or tap retry to try again.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: AppColors.textSecondary),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Center(child: OutlinedButton(onPressed: onRetry, child: const Text('Retry'))),
+      ],
     );
   }
 }

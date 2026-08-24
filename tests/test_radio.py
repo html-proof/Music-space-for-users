@@ -4,6 +4,13 @@ Radio stations and queue-exhaustion autoplay.
 Everything here runs with REDIS_ENABLED off, so the station lives in
 cache_service's in-memory fallback -- which is exactly the degraded mode a free
 Render deployment without Upstash runs in.
+
+Station tracks come from Gaana, never from a `songs` scan, so `seed_catalog`
+seeds *Gaana* rather than the database: it registers raw track payloads that the
+stubbed client returns, and lets the normal upsert path create the rows. The
+`Song` objects it hands back therefore have the same ids the endpoint will
+return, which is what the id assertions below rely on -- but nothing in the
+service reaches those rows except through Gaana.
 """
 import pytest
 from httpx import AsyncClient
@@ -39,26 +46,109 @@ async def make_user(db: AsyncSession, firebase_uid: str = "direct-caller") -> st
     return user.id
 
 
+#: Raw Gaana track payloads the stubbed client will serve. Populated by
+#: `seed_catalog`, cleared per test by the `gaana_upstream` fixture.
+_UPSTREAM_TRACKS: list = []
+
+
+def _raw_track(song: Song) -> dict:
+    """The Gaana payload a seeded row corresponds to.
+
+    Keyed by the same `seokey`, so `upsert_gaana_song` matches the existing row
+    and hands back the same id rather than creating a duplicate.
+    """
+    return {
+        "seokey": song.external_id,
+        "track_id": song.external_id,
+        "title": song.title,
+        "artists": song.artist_name,
+        "album": song.album_name or "Single",
+        "duration": str(song.duration or 0),
+        "language": song.language or "English",
+        "genres": song.genre or "",
+        "mood": song.mood or "",
+        "is_explicit": False,
+        "images": {"urls": {}},
+        "stream_urls": {"urls": {}},
+    }
+
+
+#: Field groups a query is matched against, mirroring how a real search behaves:
+#: all tokens have to land in the *same* group, so "Radio Artist" matches the
+#: artist credit rather than any track whose title happens to contain "Radio"
+#: and whose credit happens to contain "Artist".
+_MATCH_GROUPS = (("artists",), ("title", "album"), ("genres", "mood", "language"))
+
+
+def _matches(track: dict, query: str) -> bool:
+    tokens = [t for t in (query or "").lower().split() if t]
+    if not tokens:
+        return False
+    for group in _MATCH_GROUPS:
+        haystack = " ".join(str(track.get(field) or "") for field in group).lower()
+        if all(token in haystack for token in tokens):
+            return True
+    return False
+
+
 @pytest.fixture(autouse=True)
-def no_upstream(monkeypatch):
+def gaana_upstream(monkeypatch):
     """
-    Starting a station is allowed one upstream call. Tests must not make it, so
-    every network entry point radio touches returns the library's own
-    no-results shape.
+    Gaana, stubbed to serve exactly what `seed_catalog` registered.
+
+    This replaces a fixture that made every upstream call fail, back when the
+    station was really being built from a `select(Song)` scan and upstream was
+    only ever an optional widening step. Now that Gaana is the only source, a
+    dead upstream means an empty station -- which is what
+    `test_dead_upstream_cannot_start_a_station` asserts, deliberately, on its
+    own.
     """
-    async def empty_tracks(*args, **kwargs):
+    _UPSTREAM_TRACKS.clear()
+
+    async def search_songs(query, limit=10, *args, **kwargs):
+        matched = [t for t in _UPSTREAM_TRACKS if _matches(t, query)]
+        return matched[:limit] if matched else {"error": "no results"}
+
+    async def get_trending(language="English", limit=10, *args, **kwargs):
+        return list(_UPSTREAM_TRACKS)[:limit] or {"error": "no results"}
+
+    async def get_new_releases(language="English", limit=10, *args, **kwargs):
+        return {"tracks": list(_UPSTREAM_TRACKS)[:limit]}
+
+    async def get_track_info(seokeys, *args, **kwargs):
+        wanted = set(seokeys or [])
+        return [t for t in _UPSTREAM_TRACKS if t["seokey"] in wanted] or {"error": "no results"}
+
+    async def get_top_tracks(*args, **kwargs):
         return {"error": "no results"}
 
-    async def empty_list(*args, **kwargs):
+    monkeypatch.setattr(catalog_service.gaana, "search_songs", search_songs)
+    monkeypatch.setattr(catalog_service.gaana, "get_trending", get_trending)
+    monkeypatch.setattr(catalog_service.gaana, "get_new_releases", get_new_releases)
+    monkeypatch.setattr(catalog_service.gaana, "get_track_info", get_track_info)
+    monkeypatch.setattr(catalog_service.gaana, "get_top_tracks", get_top_tracks)
+    yield
+    _UPSTREAM_TRACKS.clear()
+
+
+@pytest.fixture
+def dead_upstream(monkeypatch):
+    """Gaana unreachable: every entry point returns the no-results shape."""
+    async def failed(*args, **kwargs):
         return {"error": "no results"}
 
-    monkeypatch.setattr(catalog_service.gaana, "get_top_tracks", empty_tracks)
-    monkeypatch.setattr(catalog_service.gaana, "get_trending", empty_list)
-    monkeypatch.setattr(catalog_service.gaana, "get_track_info", empty_list)
+    for method in ("search_songs", "get_trending", "get_new_releases",
+                   "get_track_info", "get_top_tracks"):
+        monkeypatch.setattr(catalog_service.gaana, method, failed)
 
 
 async def seed_catalog(db: AsyncSession, n: int = 12, artist_name: str = "Radio Artist"):
-    """A catalogue big enough that a 20-track batch has room to work with."""
+    """A Gaana catalogue big enough that a 20-track batch has room to work with.
+
+    Rows are written first so the test has stable ids to assert on; the same
+    tracks are then registered upstream, which is where the service actually
+    reads them from.
+    """
     songs = [
         Song(
             external_id=f"radio-s{i}",
@@ -77,6 +167,7 @@ async def seed_catalog(db: AsyncSession, n: int = 12, artist_name: str = "Radio 
     await db.commit()
     for s in songs:
         await db.refresh(s)
+    _UPSTREAM_TRACKS.extend(_raw_track(s) for s in songs)
     return songs
 
 
@@ -178,6 +269,8 @@ async def test_artist_seeded_radio_resolves_a_stored_artist_row(
     )
     db_session.add(song)
     await db_session.commit()
+    await db_session.refresh(song)
+    _UPSTREAM_TRACKS.append(_raw_track(song))
 
     # Every identifier a client might plausibly hold for the same artist.
     for seed in (artist.id, "gaana-artist-9", "seeded-artist", "Seeded Artist"):
@@ -235,6 +328,10 @@ async def test_unknown_seed_is_404_not_500(
     """
     Seed ids come straight from the request body. A non-uuid one used to reach a
     native uuid column and 500; it has to be a clean client error.
+
+    The artist case is now resolved against Gaana rather than against a local
+    `songs` LIKE scan, so "nobody-by-that-name" is rejected because Gaana has
+    nothing for it -- not because we happen not to have ingested it.
     """
     await seed_catalog(db_session)
 
@@ -284,6 +381,31 @@ async def test_unknown_seed_type_is_rejected(client: AsyncClient, auth_headers: 
 async def test_empty_catalogue_cannot_start_a_station(
     client: AsyncClient, auth_headers: dict
 ):
+    """Nothing registered upstream, so Gaana has nothing to build a station
+    from and the endpoint says so."""
+    res = await client.post("/api/player/radio", json={}, headers=auth_headers)
+    assert res.status_code == 404, res.text
+    assert res.json()["error"]["code"] == "RADIO_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_dead_upstream_cannot_start_a_station(
+    client: AsyncClient, auth_headers: dict, db_session: AsyncSession, dead_upstream
+):
+    """Rows in `songs` must not rescue a station when Gaana is unreachable.
+
+    A full local catalogue is seeded and Gaana is then made to fail. The old
+    implementation answered from `SELECT ... ORDER BY play_count`, so the
+    station played on and every listener converged on the same locally-popular
+    tracks; the honest answer is that the station cannot start.
+    """
+    for i in range(12):
+        db_session.add(Song(
+            external_id=f"stale-{i}", title=f"Stale {i}", artist_name="Stale Artist",
+            duration=200, genre="Pop", language="English", play_count=100 + i,
+        ))
+    await db_session.commit()
+
     res = await client.post("/api/player/radio", json={}, headers=auth_headers)
     assert res.status_code == 404, res.text
     assert res.json()["error"]["code"] == "RADIO_UNAVAILABLE"

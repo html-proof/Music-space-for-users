@@ -1,27 +1,44 @@
 """Candidate generation -- the retrieval stage.
 
-Ranking every song in the catalog for every request does not scale, so retrieval
-narrows the field to a few hundred plausible candidates cheaply, and only those
-get the full feature treatment. With 20 songs in the database today every source
-returns the whole catalog and this layer is a no-op; it is written for the shape
-the catalog will have after `ingest_catalog.py` runs, and the caps are what stop
-a 100k-song catalog from turning the home feed into a table scan.
+**Every music candidate here comes from Gaana.** Retrieval used to be five
+`select(Song)` scans, which made Postgres the de-facto catalog: the home feed
+could only ever recommend songs that some earlier request happened to have
+ingested, so a fresh deployment recommended nothing and a stale one recommended
+last month's ingest forever. The database is now user data only -- what the user
+played, liked and playlisted -- and the songs themselves are fetched live.
 
-Five sources, each capped and each tagging its output. Provenance is itself a
-ranking feature (`src_*`), so the ranker can learn that, say, CF candidates
-convert better than popularity ones for a given user population -- something a
-hand-tuned blend cannot discover.
+Three of the five sources are direct Gaana reads, driven by the preferences and
+affinities held in Postgres:
 
-The union always includes popularity, which guarantees a non-empty candidate set
-for a brand-new user with no history and no declared preferences.
+    preferences/affinities (Postgres)  ->  Gaana fetch  ->  candidates
+
+    artist_genre  top artists and genres      -> Gaana artist/genre search
+    content       strongest genre + language  -> Gaana search, cosine-reranked
+    popular       preferred languages         -> Gaana trending + new releases
+
+The remaining two -- `cf` and `playlist` -- are *behavioural*: they score songs
+by co-occurrence in real listening sessions and playlists, and the ids they
+produce are ids of Gaana tracks users actually played. Reading those rows back
+by primary key resolves a user-data reference; it does not browse a catalog, and
+neither source can invent a song nobody has ever played.
+
+Provenance is a ranking feature (`src_*`), so the source names are part of the
+model contract and are unchanged.
+
+Upstream calls are bounded twice over: `SOURCE_CAPS` limits how many candidates
+each source contributes, and `FETCH_BUDGET_SECONDS` limits how long the whole
+retrieval stage may spend on the network. `catalog_service` caches each distinct
+Gaana call for 30 minutes, so in steady state most of these are cache hits and
+the budget is never approached.
 """
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import select, or_, desc, func
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import is_uuid
@@ -32,10 +49,30 @@ from app.ml.features import UserState, song_vector
 
 logger = logging.getLogger("ml.candidates")
 
-# Upper bound on the content-kNN prefilter scan. Cosine is computed in Python, so
-# this is the real cost knob: 2000 songs x 256 dims is a few milliseconds under
-# numpy and stays acceptable on the fallback path.
-CONTENT_SCAN_LIMIT = 2000
+# Wall-clock ceiling on the upstream fetching done by one `generate` call. Once
+# it is spent, the remaining sources contribute nothing rather than pushing the
+# request past the client's timeout; whatever was already fetched still ranks,
+# and the next request picks up the rest from catalog_service's 30-minute cache.
+FETCH_BUDGET_SECONDS = 18.0
+
+# How many distinct upstream entities each Gaana-backed source may fan out over.
+# Each one is a separate network call, so these are cost knobs, not quality ones.
+MAX_ARTIST_FETCHES = 3
+MAX_GENRE_FETCHES = 2
+MAX_LANGUAGE_FETCHES = 2
+# Per-entity fetch size. Over-fetching here is cheap (one call either way) and
+# gives the ranker something to actually choose between.
+PER_FETCH_LIMIT = 20
+
+
+class _Budget:
+    """A shared deadline for the upstream calls in one retrieval pass."""
+
+    def __init__(self, seconds: float = FETCH_BUDGET_SECONDS):
+        self.deadline = time.monotonic() + seconds
+
+    def spent(self) -> bool:
+        return time.monotonic() >= self.deadline
 
 
 @dataclass
@@ -65,49 +102,125 @@ class CandidateSet:
         return {k: set(v) for k, v in self.sources.items()}
 
 
+def _top(scores: Dict[str, float], n: int) -> List[str]:
+    return [k for k, _ in sorted(scores.items(), key=lambda p: p[1], reverse=True)[:n]]
+
+
+def _preferred(affinity: Dict[str, float], declared: Set[str], n: int) -> List[str]:
+    """Observed affinities first, falling back to what the user declared at
+    onboarding -- which is all a brand-new user has."""
+    ordered = _top(affinity, n)
+    for value in declared:
+        if len(ordered) >= n:
+            break
+        if value and value not in ordered:
+            ordered.append(value)
+    return [v for v in ordered if v]
+
+
+async def _fetch(coro_factory, what: str) -> List[Any]:
+    """Run one upstream fetch, never letting it fail the whole retrieval."""
+    try:
+        return list(await coro_factory())
+    except Exception:
+        logger.warning("candidate fetch (%s) failed; continuing", what, exc_info=True)
+        return []
+
+
+async def _from_artist_genre(
+    db: AsyncSession,
+    state: UserState,
+    cand: CandidateSet,
+    cap: int,
+    exclude: Set[str],
+    budget: "_Budget",
+) -> None:
+    """Gaana's own top tracks for the artists and genres the user leans on.
+
+    The highest-precision source: the user either told us these artists
+    (onboarding) or demonstrated them (plays and likes), and Gaana is asked for
+    their current catalog rather than for whatever we happened to ingest once.
+    """
+    from app.services.catalog_service import catalog_service
+
+    artists = _preferred(state.artist_affinity, state.favorite_artists, MAX_ARTIST_FETCHES)
+    genres = _preferred(state.genre_affinity, state.favorite_genres, MAX_GENRE_FETCHES)
+    languages = _preferred(state.language_affinity, state.preferred_languages, 1)
+    language = languages[0] if languages else None
+
+    added = 0
+    for artist in artists:
+        if budget.spent() or added >= cap:
+            return
+        for song in await _fetch(
+            lambda a=artist: catalog_service.get_artist_top_songs(db, a, limit=PER_FETCH_LIMIT),
+            "artist:%s" % artist,
+        ):
+            if str(song.id) in exclude:
+                continue
+            cand.add(song, "artist_genre")
+            added += 1
+
+    for genre in genres:
+        if budget.spent() or added >= cap:
+            return
+        for song in await _fetch(
+            lambda g=genre: catalog_service.get_genre_or_mood_songs(
+                db, g, language, limit=PER_FETCH_LIMIT
+            ),
+            "genre:%s" % genre,
+        ):
+            if str(song.id) in exclude:
+                continue
+            cand.add(song, "artist_genre")
+            added += 1
+
+
 async def _from_content(
     db: AsyncSession,
     state: UserState,
     cand: CandidateSet,
     cap: int,
     exclude: Set[str],
+    budget: "_Budget",
 ) -> None:
-    """Content kNN against the taste vector.
+    """Content kNN against the taste vector, over a Gaana-fetched pool.
 
-    A SQL prefilter on the user's strongest languages/genres/artists bounds the
-    scan; exact cosine then reorders within it. This is approximate by
-    construction -- a song in a language the user has never touched cannot be
-    retrieved here -- which is precisely what the other four sources are for.
+    The pool used to be a bounded `select(Song)` prefilter. It is now a live
+    Gaana search for the user's strongest mood/genre in their strongest
+    language, plus everything the other sources have already pulled in this
+    pass -- cosine then reorders within it. Approximate by construction, which
+    is what the other sources are for.
     """
     if state.taste_vector is None or linalg.l2_norm(state.taste_vector) <= 1e-12:
         return
 
-    def _top(scores: Dict[str, float], n: int) -> List[str]:
-        return [k for k, _ in sorted(scores.items(), key=lambda p: p[1], reverse=True)[:n]]
+    from app.services.catalog_service import catalog_service
 
-    langs = _top(state.language_affinity, 3) or list(state.preferred_languages)[:3]
-    genres = _top(state.genre_affinity, 5) or list(state.favorite_genres)[:5]
-    artists = _top(state.artist_affinity, 8) or list(state.favorite_artists)[:8]
+    languages = _preferred(state.language_affinity, state.preferred_languages, 1)
+    language = languages[0] if languages else None
+    terms = _preferred(state.mood_affinity, set(), 1) or _preferred(
+        state.genre_affinity, state.favorite_genres, 1
+    )
 
-    filters = []
-    if langs:
-        filters.append(func.lower(Song.language).in_([l.lower() for l in langs]))
-    if genres:
-        filters.append(func.lower(Song.genre).in_([g.lower() for g in genres]))
-    if artists:
-        filters.append(func.lower(Song.artist_name).in_([a.lower() for a in artists]))
+    pool: List[Any] = list(cand.songs.values())
+    if terms and not budget.spent():
+        pool.extend(
+            await _fetch(
+                lambda t=terms[0]: catalog_service.get_genre_or_mood_songs(
+                    db, t, language, limit=PER_FETCH_LIMIT
+                ),
+                "content:%s" % terms[0],
+            )
+        )
 
-    stmt = select(Song)
-    if filters:
-        stmt = stmt.where(or_(*filters))
-    stmt = stmt.order_by(desc(Song.play_count)).limit(CONTENT_SCAN_LIMIT)
-
-    rows = list((await db.execute(stmt)).scalars().all())
     scored: List[Tuple[float, Any, Any]] = []
-    for song in rows:
+    seen: Set[str] = set()
+    for song in pool:
         song_id = str(song.id)
-        if song_id in exclude:
+        if song_id in exclude or song_id in seen:
             continue
+        seen.add(song_id)
         vec = cand.vectors.get(song_id) or song_vector(song)
         scored.append((linalg.cosine(state.taste_vector, vec), song, vec))
 
@@ -116,17 +229,72 @@ async def _from_content(
         cand.add(song, "content", vector=vec)
 
 
+async def _from_popular(
+    db: AsyncSession,
+    state: UserState,
+    cand: CandidateSet,
+    cap: int,
+    exclude: Set[str],
+    budget: "_Budget",
+) -> None:
+    """Gaana's live trending and new releases for the user's languages.
+
+    Unconditional: this is what makes the candidate set non-empty for a user
+    with no history at all, and -- unlike the popularity scan it replaces -- it
+    reflects what is charting on Gaana right now rather than the play counts
+    accumulated in our own database.
+    """
+    from app.services.catalog_service import catalog_service
+
+    languages = _preferred(
+        state.language_affinity, state.preferred_languages, MAX_LANGUAGE_FETCHES
+    )
+    if not languages:
+        # Nothing declared and nothing observed: Gaana's broadest-covered
+        # language is the only non-arbitrary starting point for a cold user.
+        languages = ["English"]
+
+    added = 0
+    for language in languages:
+        if budget.spent() or added >= cap:
+            return
+        for song in await _fetch(
+            lambda l=language: catalog_service.get_trending(db, l, limit=PER_FETCH_LIMIT),
+            "trending:%s" % language,
+        ):
+            if str(song.id) in exclude:
+                continue
+            cand.add(song, "popular")
+            added += 1
+
+    if budget.spent() or added >= cap:
+        return
+    for song in await _fetch(
+        lambda: catalog_service.get_new_releases(db, languages[0], limit=PER_FETCH_LIMIT),
+        "newreleases:%s" % languages[0],
+    ):
+        if str(song.id) in exclude:
+            continue
+        cand.add(song, "popular")
+        added += 1
+
+
 async def _from_cf(
     db: AsyncSession,
     state: UserState,
     cand: CandidateSet,
     cap: int,
     exclude: Set[str],
+    budget: "_Budget",
 ) -> None:
     """Item-item CF neighbours of the user's recent plays.
 
-    Silently contributes nothing until a model has been trained, which is the
-    expected state on a fresh database.
+    Behavioural, not catalogue: the neighbour table is built from real listening
+    sessions, so every id it returns is a Gaana track someone actually played.
+    Reading those rows back by primary key resolves that reference; it does not
+    browse the database for recommendations.
+
+    Silently contributes nothing until a model has been trained.
     """
     from app.ml import item_similarity, registry
 
@@ -161,86 +329,19 @@ async def _from_cf(
         cand.cf_scores[song_id] = scores.get(song_id, 0.0)
 
 
-async def _from_artist_genre(
-    db: AsyncSession,
-    state: UserState,
-    cand: CandidateSet,
-    cap: int,
-    exclude: Set[str],
-) -> None:
-    """Straight SQL expansion on the user's top artists and genres.
-
-    Cheap, high-precision, and the source that carries the load while the taste
-    vector is still thin.
-    """
-    def _top(scores: Dict[str, float], n: int) -> List[str]:
-        return [k for k, _ in sorted(scores.items(), key=lambda p: p[1], reverse=True)[:n]]
-
-    artists = _top(state.artist_affinity, 5) or list(state.favorite_artists)[:5]
-    genres = _top(state.genre_affinity, 3) or list(state.favorite_genres)[:3]
-    if not artists and not genres:
-        return
-
-    filters = []
-    if artists:
-        filters.append(func.lower(Song.artist_name).in_([a.lower() for a in artists]))
-    if genres:
-        filters.append(func.lower(Song.genre).in_([g.lower() for g in genres]))
-
-    stmt = select(Song).where(or_(*filters)).order_by(desc(Song.play_count)).limit(cap * 2)
-    for song in (await db.execute(stmt)).scalars().all():
-        if str(song.id) not in exclude:
-            cand.add(song, "artist_genre")
-
-
-async def _from_popular(
-    db: AsyncSession,
-    state: UserState,
-    cand: CandidateSet,
-    cap: int,
-    exclude: Set[str],
-) -> None:
-    """Popularity backstop. Language-filtered when known, unfiltered otherwise.
-
-    This source is unconditional: it is what makes the candidate set non-empty
-    for a user with no history at all.
-    """
-    langs = [l for l in state.preferred_languages if l]
-    stmt = select(Song)
-    if langs:
-        stmt = stmt.where(func.lower(Song.language).in_([l.lower() for l in langs]))
-    stmt = stmt.order_by(desc(Song.play_count)).limit(cap * 2)
-
-    rows = list((await db.execute(stmt)).scalars().all())
-    if not rows and langs:
-        # Preferred language has no catalog coverage yet -- fall back to global
-        # popularity rather than returning an empty feed.
-        rows = list(
-            (await db.execute(select(Song).order_by(desc(Song.play_count)).limit(cap * 2)))
-            .scalars().all()
-        )
-
-    added = 0
-    for song in rows:
-        if str(song.id) in exclude:
-            continue
-        cand.add(song, "popular")
-        added += 1
-        if added >= cap:
-            break
-
-
 async def _from_playlists(
     db: AsyncSession,
     state: UserState,
     cand: CandidateSet,
     cap: int,
     exclude: Set[str],
+    budget: "_Budget",
 ) -> None:
     """Songs that share a playlist with something the user liked.
 
-    Human-curated co-occurrence, and unlike CF it works with a single like
-    because the curation was done by someone else.
+    Behavioural for the same reason as `_from_cf`: the co-occurrence is human
+    curation recorded in user data, and the songs it names are Gaana tracks a
+    real person put in a real playlist.
     """
     seeds = [s for s in list(state.liked_song_ids)[:50] if is_uuid(s)]
     if not seeds:
@@ -278,25 +379,27 @@ async def generate(
     """
     exclude = set(exclude_ids or set())
     cand = CandidateSet()
+    budget = _Budget()
 
     handlers = {
-        "content": _from_content,
-        "cf": _from_cf,
         "artist_genre": _from_artist_genre,
         "popular": _from_popular,
+        "content": _from_content,
+        "cf": _from_cf,
         "playlist": _from_playlists,
     }
+    # `content` reranks the pool the fetching sources built, so it has to run
+    # after them regardless of the order the caller listed the sources in.
+    order = {"artist_genre": 0, "popular": 1, "cf": 2, "playlist": 3, "content": 4}
+    enabled = sorted({s for s in sources if s in handlers}, key=lambda s: order[s])
 
-    for name in sources:
-        handler = handlers.get(name)
-        if handler is None:
-            continue
+    for name in enabled:
+        handler = handlers[name]
         cap = config.SOURCE_CAPS.get(name, 100)
         try:
-            await handler(db, state, cand, cap, exclude)
+            await handler(db, state, cand, cap, exclude, budget)
         except Exception:
-            # One failing source must not empty the feed; popularity almost
-            # always survives and is enough to render something.
+            # One failing source must not empty the feed.
             logger.exception("candidate source %r failed; continuing", name)
 
     if len(cand) > limit:
@@ -332,15 +435,19 @@ async def for_seed_song(
 ) -> CandidateSet:
     """Candidates related to one song -- powers autoplay/radio and similar-songs.
 
-    Unlike `generate`, this is seeded by an item rather than a user, so it also
-    works for an anonymous or brand-new listener.
+    Seeded by an item rather than a user, so it also works for an anonymous or
+    brand-new listener. The content pool is Gaana's own catalog for the seed's
+    artist and genre, cosine-reranked against the seed vector; the CF half is
+    behavioural, exactly as in `generate`.
     """
-    from app.ml import item_similarity, registry
+    from app.ml import registry
+    from app.services.catalog_service import catalog_service
 
     exclude = set(exclude_ids or set())
     exclude.add(str(getattr(seed, "id", "") or ""))
     cand = CandidateSet()
     seed_vec = song_vector(seed)
+    budget = _Budget()
 
     neighbors = await registry.load_item_neighbors(db)
     seed_id = str(getattr(seed, "id", "") or "")
@@ -354,24 +461,33 @@ async def for_seed_song(
                 cand.add(song, "cf")
                 cand.cf_scores[str(song.id)] = sim_by_id.get(str(song.id), 0.0) / peak
 
-    filters = []
-    if getattr(seed, "artist_name", None):
-        filters.append(func.lower(Song.artist_name) == seed.artist_name.strip().lower())
-    if getattr(seed, "genre", None):
-        filters.append(func.lower(Song.genre) == seed.genre.strip().lower())
-    if getattr(seed, "language", None):
-        filters.append(func.lower(Song.language) == seed.language.strip().lower())
-
-    stmt = select(Song)
-    if filters:
-        stmt = stmt.where(or_(*filters))
-    stmt = stmt.order_by(desc(Song.play_count)).limit(CONTENT_SCAN_LIMIT)
+    pool: List[Any] = []
+    artist_name = (getattr(seed, "artist_name", "") or "").strip()
+    if artist_name and not budget.spent():
+        pool.extend(
+            await _fetch(
+                lambda: catalog_service.get_artist_top_songs(db, artist_name, limit=PER_FETCH_LIMIT),
+                "seed-artist:%s" % artist_name,
+            )
+        )
+    genre = (getattr(seed, "genre", "") or "").strip()
+    if genre and not budget.spent():
+        pool.extend(
+            await _fetch(
+                lambda: catalog_service.get_genre_or_mood_songs(
+                    db, genre, getattr(seed, "language", None), limit=PER_FETCH_LIMIT
+                ),
+                "seed-genre:%s" % genre,
+            )
+        )
 
     scored: List[Tuple[float, Any, Any]] = []
-    for song in (await db.execute(stmt)).scalars().all():
+    seen: Set[str] = set()
+    for song in pool:
         song_id = str(song.id)
-        if song_id in exclude:
+        if song_id in exclude or song_id in seen:
             continue
+        seen.add(song_id)
         vec = song_vector(song)
         scored.append((linalg.cosine(seed_vec, vec), song, vec))
 
@@ -379,12 +495,17 @@ async def for_seed_song(
     for _, song, vec in scored[:limit]:
         cand.add(song, "content", vector=vec)
 
-    if len(cand) < limit:
-        # A seed-only "user" so the popularity backstop can run unchanged; it
-        # reads no personal fields beyond preferred_languages, which is empty here.
+    if len(cand) < limit and not budget.spent():
+        # A seed-only "user" so the trending backstop can run unchanged; it
+        # reads no personal fields beyond preferred_languages.
         filler_state = UserState(
-            user_id="", as_of=datetime.now(timezone.utc), taste_vector=seed_vec
+            user_id="",
+            as_of=datetime.now(timezone.utc),
+            taste_vector=seed_vec,
+            preferred_languages={(getattr(seed, "language", "") or "").strip()} - {""},
         )
-        await _from_popular(db, filler_state, cand, cap=limit - len(cand), exclude=exclude)
+        await _from_popular(
+            db, filler_state, cand, cap=limit - len(cand), exclude=exclude, budget=budget
+        )
 
     return cand

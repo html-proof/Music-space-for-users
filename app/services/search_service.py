@@ -1,27 +1,25 @@
-"""Search that ranks, rather than returning whatever order upstream sent.
+"""Search that ranks, rather than returning whatever order Gaana sent.
 
-`catalog_service.search_songs` is the retrieval half: it asks Gaana, upserts what
-comes back, and falls back to a local `ILIKE` when Gaana is unreachable. What it
-does not do is *order* -- results arrive in upstream order, and the local fallback
-in whatever order Postgres returned rows.
+Retrieval is Gaana and only Gaana. `catalog_service.search_songs` asks Gaana and
+returns what came back; this module reorders that set and nothing more. Both
+halves of the split matter:
 
-This module adds the ranking half:
+* **Retrieval never widens.** A local `ILIKE` over the songs table used to be
+  merged into the candidate pool, which meant search could return a song Gaana
+  had not matched -- results were partly a view of our own ingest, and got more
+  stale-looking the longer a deployment ran.
+* **Retrieval never narrows.** Every song Gaana returned is in the response;
+  ranking only changes the order, so the endpoint contract ("what Gaana has for
+  this query") is unchanged while the first result is the one the user meant.
 
-1. widen the candidate pool with local lexical matches (the upstream call misses
-   songs already in our catalogue whose album or artist matches the query),
-2. score every candidate with `search_rank`: lexical relevance weighted 3x
-   personalization, plus a small popularity term,
-3. trim to `limit`.
-
-Retrieval is never *narrowed* here. A song upstream returned is always in the
-response; ranking only reorders. That keeps the endpoint's contract -- "what the
-catalogue has for this query" -- unchanged while making the first result the one
-the user meant.
+Scoring is `search_rank`: lexical relevance weighted 3x personalization, plus a
+small popularity term. Personalization is drawn from the user state in Postgres
+-- their listening history -- which is user data, not catalog.
 """
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
@@ -35,53 +33,18 @@ from app.utils.cache_keys import search_suggest_key
 
 logger = logging.getLogger("search_service")
 
-# Local rows pulled in as extra ranking candidates. Bounded because this is a
-# LIKE scan: on a large catalogue an unbounded one would be the slowest part of
-# the request.
-LOCAL_CANDIDATE_LIMIT = 200
-# Tokens shorter than this match too much to be worth a LIKE clause.
-MIN_TOKEN_LENGTH = 2
-SUGGEST_CANDIDATE_LIMIT = 120
+# How many Gaana results back an autocomplete request. Larger than the number of
+# suggestions shown, because several results usually collapse to one suggestion
+# (same artist, same album).
+SUGGEST_CANDIDATE_LIMIT = 20
 SUGGEST_CACHE_TTL = 300
+# Autocomplete fires per keystroke and each miss is now a Gaana call, so a
+# one-character prefix -- which matches most of the catalog and narrows nothing
+# -- is answered from the user own recent searches alone.
+MIN_SUGGEST_PREFIX = 2
 
 
 class SearchService:
-    @staticmethod
-    async def _local_candidates(
-        db: AsyncSession, query: str, limit: int = LOCAL_CANDIDATE_LIMIT
-    ) -> List[Song]:
-        """Local songs whose title, artist or album matches any query token.
-
-        Broader than `catalog_service`'s fallback (which matches the whole query
-        against title and artist only), because this feeds a ranker: recall costs
-        little when the scorer decides the order, and a token match is how
-        "arijit tum hi ho" finds a song titled "Tum Hi Ho".
-        """
-        tokens = [t for t in search_rank._tokens(query) if len(t) >= MIN_TOKEN_LENGTH]
-        if not tokens:
-            return []
-
-        conditions = []
-        for token in tokens[:6]:
-            pattern = f"%{token}%"
-            conditions.extend([
-                Song.title.ilike(pattern),
-                Song.artist_name.ilike(pattern),
-                Song.album_name.ilike(pattern),
-            ])
-
-        try:
-            res = await db.execute(
-                select(Song)
-                .where(or_(*conditions))
-                .order_by(Song.play_count.desc())
-                .limit(limit)
-            )
-            return list(res.scalars().all())
-        except Exception as e:
-            logger.warning("local search candidates failed: %s", e)
-            return []
-
     @staticmethod
     async def _state(db: AsyncSession, user_id: Optional[str]) -> Optional[UserState]:
         if not user_id:
@@ -102,19 +65,13 @@ class SearchService:
         limit: int = 10,
         user_id: Optional[str] = None,
     ) -> List[Song]:
-        """Ranked song results for `query`."""
+        """Ranked song results for `query`, all of them from Gaana."""
         upstream = await catalog_service.search_songs(db, query, limit=limit)
 
         if not settings.ML_ENABLED:
             return list(upstream)
 
         candidates: List[Song] = list(upstream)
-        seen = {s.id for s in candidates}
-        for song in await cls._local_candidates(db, query):
-            if song.id not in seen:
-                seen.add(song.id)
-                candidates.append(song)
-
         if not candidates:
             return []
 
@@ -129,7 +86,7 @@ class SearchService:
                 max_play_count=peak,
                 # Nothing is filtered out: -1 is below the lowest possible score,
                 # so a candidate with no lexical overlap is ranked last rather
-                # than dropped. Upstream decided it was relevant; we only reorder.
+                # than dropped. Gaana decided it was relevant; we only reorder.
                 min_lexical=-1.0,
             )
         except Exception:
@@ -164,17 +121,23 @@ class SearchService:
         limit: int = 10,
         user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Autocomplete suggestions, local-only.
+        """Autocomplete suggestions, drawn from Gaana.
 
-        No upstream call: autocomplete fires on every keystroke, and a round trip
-        per character would be both slow and a good way to get rate-limited by
-        Gaana. Suggestions therefore come from the catalogue we already hold --
-        which is exactly the catalogue the user can play.
+        These used to be a `LIKE` scan of the songs table, which made the
+        dropdown a view of our own ingest: a user typing a song Gaana has but we
+        had never fetched got no suggestion at all, while songs ingested months
+        ago kept surfacing.
 
-        The shared (non-personalized) part is cached by prefix; the user's own
-        recent searches are merged in afterwards, so the cache stays hot on the
-        short prefixes that dominate autocomplete traffic without leaking one
-        user's history into another's suggestions.
+        Autocomplete fires on every keystroke, so a naive Gaana call per
+        character would be slow and a good way to get rate-limited. Two things
+        keep the volume down, and neither reintroduces a local catalog: the
+        shared (non-personalized) part of each prefix is cached for
+        SUGGEST_CACHE_TTL, so only the first user to type a given prefix pays
+        for it; and prefixes shorter than MIN_SUGGEST_PREFIX skip the call
+        entirely, since they narrow nothing.
+
+        The user own recent searches are merged in afterwards rather than being
+        cached, so one user history never leaks into another suggestions.
         """
         prefix = (prefix or "").strip()
         if not prefix:
@@ -187,7 +150,18 @@ class SearchService:
             shared = cached
 
         if shared is None:
-            candidates = await cls._local_candidates(db, prefix, limit=SUGGEST_CANDIDATE_LIMIT)
+            candidates: List[Song] = []
+            if len(prefix) >= MIN_SUGGEST_PREFIX:
+                try:
+                    candidates = list(
+                        await catalog_service.search_songs(
+                            db, prefix, limit=SUGGEST_CANDIDATE_LIMIT
+                        )
+                    )
+                except Exception:
+                    # A failed lookahead must not fail the keystroke; the user
+                    # recent searches below still produce something useful.
+                    logger.warning("suggest lookup for %r failed", prefix, exc_info=True)
             shared = search_rank.suggest(prefix, candidates, state=None, limit=limit)
             if shared:
                 await cache_service.set_json(cache_key, shared, ttl_seconds=SUGGEST_CACHE_TTL)
