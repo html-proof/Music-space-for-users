@@ -66,7 +66,31 @@ class _ArtistSelectionScreenState extends ConsumerState<ArtistSelectionScreen> {
 
   Widget _grid(List<Artist> artists) {
     if (artists.isEmpty) {
-      return const Center(child: Text('No artists found', style: TextStyle(color: AppColors.textSecondary)));
+      // Suggestions come from Gaana charts for the languages just chosen, so
+      // an empty grid means the upstream call found nothing or could not be
+      // made. There is deliberately no house list of artists to fall back on.
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off, color: AppColors.textSecondary, size: 40),
+              const SizedBox(height: 12),
+              const Text(
+                'No artist suggestions right now. Retry, search for an artist by name, or continue and pick some later.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppColors.textSecondary),
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed: () => ref.invalidate(suggestedArtistsProvider),
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
     }
     return GridView.builder(
       padding: const EdgeInsets.all(16),

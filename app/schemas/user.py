@@ -5,7 +5,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class UserPreferencesResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    preferred_languages: List[str] = Field(default_factory=lambda: ["English", "Hindi"])
+    # No default. A user who has not chosen has chosen nothing, and claiming
+    # otherwise here would report a preference they never expressed -- the
+    # stored column already defaults to an empty list, so this only ever
+    # disagreed with it.
+    preferred_languages: List[str] = Field(default_factory=list)
     favorite_artists: List[str] = Field(default_factory=list)
     favorite_genres: List[str] = Field(default_factory=list)
     favorite_moods: List[str] = Field(default_factory=list)

@@ -376,15 +376,21 @@ async def test_candidate_retrieval_ignores_the_local_songs_table(db_session: Asy
 
 
 @pytest.mark.asyncio
-async def test_home_feed_trending_falls_back_to_english_when_preferred_language_has_no_coverage(
+async def test_home_feed_trending_falls_back_across_languages_without_coverage(
     client: AsyncClient, auth_headers: dict, db_session: AsyncSession, monkeypatch
 ):
-    """A user's preferred language may have no Gaana trending coverage (or
-    that call may fail/time out) -- the Trending shelf must still show
-    something rather than leaving the home screen with nothing in it,
-    the same way onboarding's artist suggestions already fall back across
-    languages."""
+    """A user preferred language may have no Gaana trending coverage (or that
+    call may fail/time out) -- the Trending shelf still shows something rather
+    than leaving the home screen empty.
+
+    Which language is tried next comes from Gaana own chart listing, ordered by
+    how much it holds per language; it used to be a hardcoded "English"."""
     from app.services.catalog_service import catalog_service
+
+    async def charts(limit, *args, **kwargs):
+        return [{"seokey": "c1", "title": "Top English", "language": "English"}]
+
+    monkeypatch.setattr(catalog_service.gaana, "get_charts", charts)
 
     async def fake_get_trending(language, limit):
         if language != "English":
@@ -436,6 +442,11 @@ async def test_home_feed_catalog_shelves_refetch_on_cache_hit(
     # the raw Gaana call -- bypass only that layer so this test can observe
     # the raw call happening again, without disturbing the home-feed cache
     # this test is actually exercising.
+    async def charts(limit, *args, **kwargs):
+        return [{"seokey": "c1", "title": "Top English", "language": "English"}]
+
+    monkeypatch.setattr(catalog_service.gaana, "get_charts", charts)
+
     real_get_json = cache_service.get_json
 
     async def get_json_bypassing_trending_cache(key: str):

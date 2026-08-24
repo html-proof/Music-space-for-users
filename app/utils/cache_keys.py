@@ -46,3 +46,14 @@ def search_suggest_key(prefix: str, limit: int) -> str:
     high on the short prefixes that dominate autocomplete traffic.
     """
     return f"ml:suggest:{prefix.strip().lower()}:{limit}"
+
+
+def catalog_languages_key() -> str:
+    """The languages Gaana serves, discovered from its own chart listing.
+
+    Shared across every user (it is catalog metadata, not personalization) and
+    held longer than the other catalog keys: the set of languages Gaana curates
+    charts for changes on the order of months, while the charts themselves move
+    daily.
+    """
+    return "catalog:languages"

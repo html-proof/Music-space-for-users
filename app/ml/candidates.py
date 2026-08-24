@@ -250,9 +250,12 @@ async def _from_popular(
         state.language_affinity, state.preferred_languages, MAX_LANGUAGE_FETCHES
     )
     if not languages:
-        # Nothing declared and nothing observed: Gaana's broadest-covered
-        # language is the only non-arbitrary starting point for a cold user.
-        languages = ["English"]
+        # Nothing declared and nothing observed. Ask Gaana which languages it
+        # has most of rather than hardcoding one -- a literal "English" here
+        # was a house default dressed up as a fallback.
+        languages = await catalog_service.default_languages(MAX_LANGUAGE_FETCHES)
+    if not languages:
+        return
 
     added = 0
     for language in languages:

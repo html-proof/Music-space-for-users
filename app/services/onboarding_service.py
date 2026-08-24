@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.config.languages import GAANA_LANGUAGES, canonicalize_all
 from app.db.base import is_uuid
 from app.models.onboarding import OnboardingState
 from app.models.song import Artist
@@ -91,16 +90,14 @@ class OnboardingService:
 
     @staticmethod
     async def get_languages(db: AsyncSession) -> List[str]:
-        """The languages onboarding offers.
+        """The languages onboarding offers, discovered from Gaana.
 
-        Served from `app.config.languages`, not from `SELECT DISTINCT language
-        FROM songs`. The old query made this screen a function of what had been
-        ingested: a fresh deployment offered nothing at all, and a partly warmed
-        one offered whichever two or three languages the first few searches
-        happened to touch. The list is language *names* only -- the songs for
-        whichever one the user picks are always fetched live from Gaana.
+        Neither derived from our own `songs` rows nor hardcoded: see
+        `catalog_service.get_languages`. Comes back empty only when Gaana is
+        unreachable, which the client shows as a retry rather than a default
+        list.
         """
-        return list(GAANA_LANGUAGES)
+        return await catalog_service.get_languages()
 
     @staticmethod
     async def get_suggested_artists(
@@ -129,10 +126,14 @@ class OnboardingService:
             pref = await UserService.get_preferences(db, user_id)
             preferred_languages = [lang for lang in (pref.preferred_languages or []) if lang]
 
-        # No language chosen yet: Gaana serves these two most broadly, so they
-        # are the least arbitrary way to fill the screen. They select which
-        # Gaana chart to read -- no artist is hardcoded here.
-        languages = preferred_languages or ["Hindi", "English"]
+        # No language chosen yet (the user skipped, or is revisiting the
+        # screen). Which languages to show artists for is Gaana's call, not
+        # ours: `default_languages` returns the ones it curates the most charts
+        # for. Hardcoding "Hindi, English" here made the suggestion grid a
+        # product decision rather than a reflection of the catalog.
+        languages = preferred_languages or await catalog_service.default_languages(2)
+        if not languages:
+            return []
 
         seen_ids: set = set()
         seen_names: set = set()
@@ -217,12 +218,16 @@ class OnboardingService:
         for (case-insensitive match), never whatever raw strings a client
         happens to send.
 
-        Validated against `app.config.languages`, which is the same list
-        `get_languages` served the client, rather than against whatever is in
-        the songs table -- a language with no local rows yet is a perfectly
-        valid choice, since its songs are fetched from Gaana on demand.
+        Validated against the same Gaana-discovered list `get_languages` served
+        the client, rather than against whatever is in the songs table -- a
+        language with no local rows yet is a perfectly valid choice, since its
+        songs are fetched from Gaana on demand.
         """
-        valid = canonicalize_all(languages)
+        valid: List[str] = []
+        for lang in languages:
+            resolved = await catalog_service.resolve_language(lang)
+            if resolved and resolved not in valid:
+                valid.append(resolved)
 
         if not valid:
             raise ValueError("No valid languages selected. Choose from GET /api/onboarding/languages.")

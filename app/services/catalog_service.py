@@ -7,6 +7,7 @@ from api.gaanapy import GaanaPy
 from app.db.base import is_uuid
 from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
+from app.utils.cache_keys import catalog_languages_key
 
 logger = logging.getLogger("catalog_service")
 
@@ -18,6 +19,15 @@ logger = logging.getLogger("catalog_service")
 # Gaana falls back to whatever is already cached in Postgres quickly instead
 # of stalling the whole response.
 TRENDING_FETCH_TIMEOUT_SECONDS = 8.0
+
+# How much of Gaana chart listing to read when discovering languages. The
+# endpoint tops out around 130 charts however much is asked for; this is
+# comfortably above that so the discovered set is the whole listing rather than
+# a popularity-truncated slice of it (which would silently drop the smaller
+# languages -- exactly the ones a hardcoded list also gets wrong).
+LANGUAGE_DISCOVERY_CHART_LIMIT = 500
+# Which languages Gaana curates charts for changes on the order of months.
+LANGUAGE_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 # Every read method below returns *only* what Gaana served for this request (or
 # a still-valid cached copy of a recent Gaana response). None of them falls back
@@ -165,6 +175,93 @@ class CatalogService:
         await db.commit()
         await db.refresh(song)
         return song
+
+    async def get_languages(self) -> List[str]:
+        """The languages Gaana actually serves, discovered from Gaana.
+
+        There is no "list languages" endpoint, but the top-charts listing is
+        one: Gaana curates charts per language and stamps each with the
+        language it belongs to, so the distinct set across the whole listing is
+        Gaana own answer to the question. Ordered by how many charts each has,
+        which is Gaana own signal for how much catalog sits behind it.
+
+        This replaced two earlier answers, both wrong in the same way. First
+        `SELECT DISTINCT language FROM songs`, which made the onboarding screen
+        a function of what had been ingested -- empty on a fresh deployment.
+        Then a hardcoded list in config, which was a preset: the names were
+        ours, not Gaana, and nothing kept them true.
+
+        Returns `[]` when Gaana is unreachable. The caller surfaces that as an
+        empty/retry state rather than substituting a default list.
+        """
+        cached = await cache_service.get_json(catalog_languages_key())
+        if isinstance(cached, list) and cached:
+            return [str(name) for name in cached]
+
+        try:
+            charts = await asyncio.wait_for(
+                self.gaana.get_charts(LANGUAGE_DISCOVERY_CHART_LIMIT),
+                timeout=TRENDING_FETCH_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("language discovery via charts failed", exc_info=True)
+            return []
+
+        if not isinstance(charts, list):
+            logger.warning("language discovery: charts unavailable upstream")
+            return []
+
+        counts: Dict[str, int] = {}
+        for chart in charts:
+            if not isinstance(chart, dict):
+                continue
+            # A chart may be stamped with several languages ("Tamil,Kannada,
+            # Telugu,Malayalam" is a real one), which is a listing of languages,
+            # not a language.
+            for part in str(chart.get("language") or "").split(","):
+                name = part.strip()
+                if name:
+                    counts[name] = counts.get(name, 0) + 1
+
+        if not counts:
+            return []
+
+        languages = [
+            name for name, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        await cache_service.set_json(
+            catalog_languages_key(), languages, ttl_seconds=LANGUAGE_CACHE_TTL_SECONDS
+        )
+        return languages
+
+    async def default_languages(self, limit: int = 2) -> List[str]:
+        """Which languages to query for a user who has stated no preference.
+
+        Gaana own ordering, not ours: `get_languages` ranks by how many charts
+        Gaana curates per language, so this is "whatever Gaana has most of"
+        rather than a house default. The call sites here used to hardcode
+        "English" (or "Hindi, English"), which quietly made the cold-start feed
+        a product decision baked into the source.
+
+        Empty when Gaana is unreachable, which leaves the feed empty rather than
+        populated with something nobody asked for.
+        """
+        return (await self.get_languages())[:limit]
+
+    async def resolve_language(self, name: Optional[str]) -> Optional[str]:
+        """Gaana own spelling of `name`, or None if Gaana does not serve it.
+
+        Case- and whitespace-insensitive, so a client sending "malayalam" still
+        resolves. Returning None is what stops arbitrary client input from being
+        stored as a preference and later sent upstream as a language.
+        """
+        if not name:
+            return None
+        wanted = name.strip().lower()
+        for known in await self.get_languages():
+            if known.lower() == wanted:
+                return known
+        return None
 
     async def cached_songs(self, db: AsyncSession, cached_ids: list) -> List[Song]:
         """Rehydrate a cached Gaana result, preserving Gaana's ordering.

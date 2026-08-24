@@ -356,7 +356,11 @@ class RecommendationService:
         categories: List[RecommendationCategoryResponse] = []
 
         top_languages = affinities.get("top_languages", [])
-        primary_language = top_languages[0] if top_languages else "Hindi"
+        if not top_languages:
+            # Cold user: let Gaana say which languages it has most of, rather
+            # than falling back to a literal "Hindi" chosen here.
+            top_languages = await catalog_service.default_languages(2)
+        primary_language = top_languages[0] if top_languages else ""
         top_artists = affinities.get("top_artists", [])
         top_genres = affinities.get("top_genres", [])
 
@@ -506,20 +510,24 @@ class RecommendationService:
         categories[:] = [
             c for c in categories if c.category_type not in ("trending", "new_releases")
         ]
-        language = "English"
+        preferred: List[str] = []
         if is_uuid(user_id):
             res = await db.execute(
                 select(UserPreferences.preferred_languages).where(UserPreferences.user_id == user_id)
             )
-            langs = res.scalar_one_or_none()
-            if langs:
-                language = str(langs[0])
+            preferred = [str(lang) for lang in (res.scalar_one_or_none() or []) if lang]
 
-        # A single language with no Gaana coverage (or a request that timed
-        # out) must not leave the home screen with nothing in it -- English
-        # is Gaana's broadest-covered language and is tried next, unless it
-        # was already the first attempt.
-        fallback_languages = [language] + (["English"] if language != "English" else [])
+        # A single language with no Gaana coverage (or a request that timed out)
+        # must not leave the home screen with nothing in it, so further
+        # languages are tried after the user's own. Which ones is Gaana's call --
+        # `default_languages` is ordered by how much it holds per language --
+        # rather than the literal "English" that used to be hardcoded here.
+        fallback_languages = list(preferred)
+        for language in await catalog_service.default_languages(2):
+            if language not in fallback_languages:
+                fallback_languages.append(language)
+        if not fallback_languages:
+            return
 
         async def _first_nonempty(fetch) -> List[Song]:
             for lang in fallback_languages:
