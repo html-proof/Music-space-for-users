@@ -6,6 +6,7 @@ from app.db.base import is_uuid
 from app.models.playlist import Playlist, PlaylistSong
 from app.models.song import Song
 from app.schemas.playlist import PlaylistCreate, PlaylistUpdate
+from app.services.catalog_queue import catalog_queue
 from app.services.signal_service import SignalService
 
 logger = logging.getLogger("playlist_service")
@@ -129,6 +130,10 @@ class PlaylistService:
         song_id: str,
         position: Optional[int] = None
     ) -> PlaylistSong:
+        # Before the row lock, not after: flushing the catalog queue commits,
+        # which would drop the SELECT FOR UPDATE we are about to take.
+        await catalog_queue.ensure_persisted(db, song_id)
+
         playlist = await PlaylistService.get_playlist(db, playlist_id, user_id)
         if not playlist or (playlist.user_id != user_id and not playlist.is_collaborative):
             raise PermissionError("Cannot modify this playlist.")

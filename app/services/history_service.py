@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.history import ListeningHistory, SearchHistory
 from app.models.song import Song
 from app.services.cache_service import cache_service
+from app.services.catalog_queue import catalog_queue
 from app.services.signal_service import SignalService
 from app.utils.cache_keys import home_recommendations_key
 from app.config.settings import settings
@@ -31,6 +32,9 @@ class HistoryService:
             duration_listened >= settings.MIN_LISTEN_SECONDS or
             completion_percentage >= settings.MIN_COMPLETION_PERCENTAGE
         )
+
+        # ListeningHistory.song_id is an FK, and the song may still be queued.
+        await catalog_queue.ensure_persisted(db, song_id)
 
         now = datetime.now(timezone.utc)
         entry = ListeningHistory(

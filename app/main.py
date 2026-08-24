@@ -72,6 +72,16 @@ async def lifespan(app: FastAPI):
 
         release_watch_task = asyncio.create_task(release_watch_loop())
 
+    # Drains the catalog write queue and trims the catalog to its album cap.
+    # Unlike the two above this is not optional work that a cron job could take
+    # over: requests hand out ids for rows only this loop writes.
+    catalog_writer_task = None
+    if settings.CATALOG_WRITE_QUEUE_ENABLED:
+        import asyncio
+        from app.workers.catalog_writer_worker import catalog_writer_loop
+
+        catalog_writer_task = asyncio.create_task(catalog_writer_loop())
+
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
@@ -79,6 +89,18 @@ async def lifespan(app: FastAPI):
         trainer_task.cancel()
     if release_watch_task:
         release_watch_task.cancel()
+    if catalog_writer_task:
+        # Awaited, unlike the two above: cancelling is what gives the loop its
+        # chance to flush the rows whose ids requests already handed out, and
+        # that flush only happens if we wait for it. CancelledError is a
+        # BaseException, so suppressing Exception alone would let it escape and
+        # fail the shutdown.
+        import asyncio
+        import contextlib
+
+        catalog_writer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await catalog_writer_task
     await player_pubsub.stop()
     await cache_service.close()
     await catalog_service.close()

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import is_uuid
 from app.models.song import LikedSong, SavedAlbum, FollowedArtist, Song, Album, Artist
 from app.services.cache_service import cache_service
+from app.services.catalog_queue import catalog_queue
 from app.services.signal_service import SignalService
 from app.utils.cache_keys import home_recommendations_key
 
@@ -27,6 +28,10 @@ class LibraryService:
         # is a uuid FK and an unparseable value would raise at bind time.
         if not is_uuid(song_id):
             return False
+        # The song row may still be sitting in the catalog write queue, in
+        # which case this id has no row behind it yet and the FK insert below
+        # would fail. Usually a no-op: the flusher has normally already run.
+        await catalog_queue.ensure_persisted(db, song_id)
         stmt = select(LikedSong).where(and_(LikedSong.user_id == user_id, LikedSong.song_id == song_id))
         res = await db.execute(stmt)
         liked = res.scalar_one_or_none()
@@ -100,6 +105,7 @@ class LibraryService:
         # letting it reach the uuid FK column.
         if not is_uuid(album_id):
             return False
+        await catalog_queue.ensure_persisted(db, album_id)
         stmt = select(SavedAlbum).where(and_(SavedAlbum.user_id == user_id, SavedAlbum.album_id == album_id))
         res = await db.execute(stmt)
         saved = res.scalar_one_or_none()

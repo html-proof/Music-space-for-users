@@ -22,6 +22,7 @@ from app.db.base import is_uuid
 from app.models.history import ListeningHistory
 from app.models.song import Artist, Song
 from app.services.cache_service import cache_service
+from app.services.catalog_queue import catalog_queue
 from app.services.catalog_service import catalog_service
 from app.services.recommendation_service import RecommendationService
 from app.utils.cache_keys import radio_station_key
@@ -111,6 +112,9 @@ class RadioService:
 
     @staticmethod
     async def _find_artist(db: AsyncSession, value: str) -> Optional[Artist]:
+        # Matching is by external key / seokey / name, so a queued artist would
+        # look like an unknown seed and 404 rather than start a station.
+        await catalog_queue.ensure_kind_persisted(db, "artist")
         conditions = [
             Artist.external_id == value,
             Artist.seokey == value,

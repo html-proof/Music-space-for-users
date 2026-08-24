@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.settings import settings
 from app.db.database import async_session_factory
 from app.models.song import Artist, FollowedArtist, Song
+from app.services.catalog_queue import catalog_queue
 from app.services.catalog_service import catalog_service
 from app.services.notification_service import notification_service
 
@@ -74,6 +75,10 @@ async def check_new_releases_once(db: AsyncSession) -> dict:
             if not seokey:
                 continue
 
+            # "Not in the songs table" is the whole discovery test, so a track
+            # sitting unwritten in the catalog queue would read as brand new
+            # and re-notify every follower on each pass.
+            await catalog_queue.ensure_kind_persisted(db, "song")
             existing = (
                 await db.execute(select(Song.id).where(Song.external_id == seokey))
             ).scalar_one_or_none()
@@ -82,6 +87,10 @@ async def check_new_releases_once(db: AsyncSession) -> dict:
 
             try:
                 song = await catalog_service.upsert_gaana_song(db, raw_track)
+                # The notification below stores song_id as an FK, and this
+                # worker is the one path where the row is wanted immediately
+                # rather than at the next flush.
+                await catalog_queue.ensure_persisted(db, song.id)
             except Exception:
                 logger.exception("failed to upsert newly discovered song %s", seokey)
                 continue

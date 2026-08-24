@@ -24,6 +24,21 @@ settings.APP_ENV = "development"
 
 
 @pytest.fixture(autouse=True)
+def clean_catalog_queue():
+    """
+    The catalog write queue is a process-wide singleton holding an
+    external_id -> row-id identity map. Each test gets a fresh database, so a
+    map carried over from the previous one would hand out ids for rows that no
+    longer exist.
+    """
+    from app.services.catalog_queue import CatalogWriteQueue, catalog_queue
+
+    catalog_queue.__dict__.update(CatalogWriteQueue().__dict__)
+    yield
+    catalog_queue.__dict__.update(CatalogWriteQueue().__dict__)
+
+
+@pytest.fixture(autouse=True)
 def clean_rate_limit_buckets():
     """
     Rate limit buckets live in process memory and are keyed by bearer token, so

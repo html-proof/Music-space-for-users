@@ -2,11 +2,14 @@ import asyncio
 import logging
 from typing import List, Optional, Dict, Any
 from sqlalchemy import select, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.gaanapy import GaanaPy
+from app.config.settings import settings
 from app.db.base import is_uuid
 from app.models.song import Song, Artist, Album
 from app.services.cache_service import cache_service
+from app.services.catalog_queue import catalog_queue, utcnow
 from app.utils.cache_keys import catalog_languages_key
 
 logger = logging.getLogger("catalog_service")
@@ -51,46 +54,76 @@ class CatalogService:
         if hasattr(self.gaana, '_aiohttp') and self.gaana._aiohttp and not self.gaana._aiohttp.closed:
             await self.gaana._aiohttp.close()
 
+    async def _insert_or_get(self, db: AsyncSession, stmt, build):
+        """Insert a row, tolerating a concurrent request inserting it first.
+
+        Two searches in flight at once both miss on the same Gaana artist or
+        album and both try to INSERT it, so the loser hits the unique index on
+        external_id and its IntegrityError kills the whole request. Doing the
+        INSERT inside a SAVEPOINT means the violation rolls back only that
+        statement -- the surrounding transaction stays usable -- and the row
+        the winner committed is then found by re-running the same lookup.
+        """
+        res = await db.execute(stmt)
+        row = res.scalars().first()
+        if row is not None:
+            return row
+        obj = build()
+        try:
+            async with db.begin_nested():
+                db.add(obj)
+                await db.flush()
+            return obj
+        except IntegrityError:
+            res = await db.execute(stmt)
+            row = res.scalars().first()
+            if row is None:
+                raise
+            return row
+
     async def get_or_create_artist(self, db: AsyncSession, name: str, seokey: Optional[str] = None, external_id: Optional[str] = None, image_url: Optional[str] = None) -> Artist:
         ext_id = external_id or seokey or name.lower().replace(" ", "-")
         stmt = select(Artist).where(or_(Artist.external_id == ext_id, Artist.name == name))
-        res = await db.execute(stmt)
-        artist = res.scalars().first()
-        if not artist:
-            artist = Artist(
+        return await self._insert_or_get(
+            db,
+            stmt,
+            lambda: Artist(
                 external_id=ext_id,
                 name=name,
                 seokey=seokey,
                 image_url=image_url
-            )
-            db.add(artist)
-            await db.flush()
-        return artist
+            ),
+        )
 
     async def get_or_create_album(self, db: AsyncSession, title: str, seokey: Optional[str] = None, external_id: Optional[str] = None, cover_url: Optional[str] = None, artist_id: Optional[str] = None, artist_name: str = "") -> Album:
         ext_id = external_id or seokey or title.lower().replace(" ", "-")
         stmt = select(Album).where(or_(Album.external_id == ext_id, Album.title == title))
-        res = await db.execute(stmt)
-        album = res.scalars().first()
-        if not album:
-            album = Album(
+        return await self._insert_or_get(
+            db,
+            stmt,
+            lambda: Album(
                 external_id=ext_id,
                 title=title,
                 seokey=seokey,
                 cover_url=cover_url,
                 artist_id=artist_id,
                 artist_name=artist_name
-            )
-            db.add(album)
-            await db.flush()
-        return album
+            ),
+        )
 
-    async def upsert_gaana_song(self, db: AsyncSession, raw_song: Dict[str, Any]) -> Song:
+    @staticmethod
+    def _parse_gaana_song(raw_song: Dict[str, Any]) -> Dict[str, Any]:
+        """Flatten one raw Gaana track into the fields our tables store.
+
+        Split out from the write so both the queued and the synchronous path
+        parse identically -- the queued path needs the parsed values without a
+        Song instance to hang them on.
+        """
         seokey = raw_song.get("seokey") or raw_song.get("track_id") or "unknown-track"
         title = raw_song.get("title") or raw_song.get("track_title") or "Unknown Title"
         artist_name = raw_song.get("artists") or raw_song.get("artist") or "Unknown Artist"
         album_name = raw_song.get("album") or raw_song.get("album_title") or "Single"
-        
+
         # Duration parsing
         try:
             duration = int(raw_song.get("duration", 0))
@@ -103,77 +136,179 @@ class CatalogService:
         stream_urls = raw_song.get("stream_urls", {}).get("urls", {})
         audio_url = stream_urls.get("very_high_quality") or stream_urls.get("high_quality") or stream_urls.get("medium_quality") or ""
 
-        # Check existing
-        stmt = select(Song).where(Song.external_id == seokey)
-        res = await db.execute(stmt)
-        song = res.scalar_one_or_none()
-
-        artist = await self.get_or_create_artist(
-            db,
-            name=artist_name.split(",")[0].strip() if artist_name else "Unknown Artist",
-            seokey=raw_song.get("artist_seokeys", "").split(",")[0].strip() if raw_song.get("artist_seokeys") else None,
-            external_id=raw_song.get("artist_ids", "").split(",")[0].strip() if raw_song.get("artist_ids") else None,
-            image_url=raw_song.get("artist_image")
-        )
+        primary_artist = artist_name.split(",")[0].strip() if artist_name else "Unknown Artist"
+        artist_seokey = raw_song.get("artist_seokeys", "").split(",")[0].strip() or None
+        artist_ext_id = raw_song.get("artist_ids", "").split(",")[0].strip() or None
 
         album_seokey = raw_song.get("album_seokey")
         album_ext_id = raw_song.get("album_id") or album_seokey
         if not album_ext_id:
-            # No real album identifier from Gaana (common for singles), and
-            # get_or_create_album falls back to matching by title when there
-            # is none -- every such track shares the literal title "Single",
-            # which would otherwise merge unrelated singles from every artist
-            # into one shared "Single" album. Keying off this song's own
-            # seokey instead keeps each single its own album, one row per
-            # song rather than one row for the whole catalog.
+            # No real album identifier from Gaana (common for singles), and the
+            # album lookup falls back to matching by title when there is none --
+            # every such track shares the literal title "Single", which would
+            # otherwise merge unrelated singles from every artist into one
+            # shared "Single" album. Keying off this song own seokey instead
+            # keeps each single its own album, one row per song rather than one
+            # row for the whole catalog.
             album_ext_id = f"single-{seokey}"
 
+        return {
+            "seokey": seokey,
+            "title": title,
+            "artist_name": artist_name,
+            "album_name": album_name,
+            "duration": duration,
+            "thumbnail_url": thumbnail_url,
+            "stream_urls": stream_urls,
+            "audio_url": audio_url,
+            "primary_artist": primary_artist,
+            "artist_seokey": artist_seokey,
+            "artist_ext_id": artist_ext_id or artist_seokey or primary_artist.lower().replace(" ", "-"),
+            "artist_image": raw_song.get("artist_image"),
+            "album_seokey": album_seokey,
+            "album_ext_id": album_ext_id,
+            "language": raw_song.get("language"),
+            "genre": raw_song.get("genres"),
+            "mood": raw_song.get("mood"),
+            "is_explicit": raw_song.get("is_explicit", False),
+        }
+
+    async def upsert_gaana_song(self, db: AsyncSession, raw_song: Dict[str, Any]) -> Song:
+        """Return the local Song row for a raw Gaana track, creating it if new.
+
+        By default the write itself is queued (see app/services/catalog_queue)
+        and the returned Song is a transient object carrying the id the row
+        will have; the caller needs the id and the parsed fields to build its
+        response, not the durability of the row. Set
+        CATALOG_WRITE_QUEUE_ENABLED=false to write through synchronously.
+        """
+        p = self._parse_gaana_song(raw_song)
+        if settings.CATALOG_WRITE_QUEUE_ENABLED:
+            return await self._queue_gaana_song(db, p)
+
+        artist = await self.get_or_create_artist(
+            db,
+            name=p["primary_artist"],
+            seokey=p["artist_seokey"],
+            external_id=p["artist_ext_id"],
+            image_url=p["artist_image"],
+        )
         album = await self.get_or_create_album(
             db,
-            title=album_name,
-            seokey=album_seokey,
-            external_id=album_ext_id,
-            cover_url=thumbnail_url,
+            title=p["album_name"],
+            seokey=p["album_seokey"],
+            external_id=p["album_ext_id"],
+            cover_url=p["thumbnail_url"],
             artist_id=artist.id,
-            artist_name=artist.name
+            artist_name=artist.name,
         )
 
+        stmt = select(Song).where(Song.external_id == p["seokey"])
+        song = (await db.execute(stmt)).scalar_one_or_none()
+
         if song:
-            song.title = title
+            song.title = p["title"]
             song.artist_id = artist.id
-            song.artist_name = artist_name
+            song.artist_name = p["artist_name"]
             song.album_id = album.id
-            song.album_name = album_name
-            song.duration = duration or song.duration
-            song.thumbnail_url = thumbnail_url or song.thumbnail_url
-            song.audio_url = audio_url or song.audio_url
-            song.stream_urls = stream_urls or song.stream_urls
-            song.language = raw_song.get("language") or song.language
-            song.genre = raw_song.get("genres") or song.genre
-            song.is_explicit = raw_song.get("is_explicit", False)
+            song.album_name = p["album_name"]
+            song.duration = p["duration"] or song.duration
+            song.thumbnail_url = p["thumbnail_url"] or song.thumbnail_url
+            song.audio_url = p["audio_url"] or song.audio_url
+            song.stream_urls = p["stream_urls"] or song.stream_urls
+            song.language = p["language"] or song.language
+            song.genre = p["genre"] or song.genre
+            song.is_explicit = p["is_explicit"]
         else:
             song = Song(
-                external_id=seokey,
-                title=title,
+                external_id=p["seokey"],
+                title=p["title"],
                 artist_id=artist.id,
-                artist_name=artist_name,
+                artist_name=p["artist_name"],
                 album_id=album.id,
-                album_name=album_name,
-                duration=duration,
-                thumbnail_url=thumbnail_url,
-                audio_url=audio_url,
-                stream_urls=stream_urls,
+                album_name=p["album_name"],
+                duration=p["duration"],
+                thumbnail_url=p["thumbnail_url"],
+                audio_url=p["audio_url"],
+                stream_urls=p["stream_urls"],
                 source="gaana",
-                language=raw_song.get("language") or "English",
-                genre=raw_song.get("genres") or "Pop",
-                mood=raw_song.get("mood") or "Chill",
-                is_explicit=raw_song.get("is_explicit", False),
+                language=p["language"] or "English",
+                genre=p["genre"] or "Pop",
+                mood=p["mood"] or "Chill",
+                is_explicit=p["is_explicit"],
                 play_count=0
             )
-            db.add(song)
+            try:
+                async with db.begin_nested():
+                    db.add(song)
+                    await db.flush()
+            except IntegrityError:
+                # Another in-flight request inserted this same Gaana track
+                # first; the savepoint rollback left the transaction usable,
+                # so take its row rather than failing the request.
+                res = await db.execute(select(Song).where(Song.external_id == p["seokey"]))
+                existing = res.scalar_one_or_none()
+                if existing is None:
+                    raise
+                return existing
 
         await db.commit()
         await db.refresh(song)
+        return song
+
+    async def _queue_gaana_song(self, db: AsyncSession, p: Dict[str, Any]) -> Song:
+        artist_id, artist_ext = await catalog_queue.resolve_id(
+            db, "artist", p["artist_ext_id"], match_name=p["primary_artist"]
+        )
+        await catalog_queue.enqueue("artist", {
+            "id": artist_id,
+            "external_id": artist_ext,
+            "name": p["primary_artist"],
+            "seokey": p["artist_seokey"],
+            "image_url": p["artist_image"],
+        })
+
+        album_id, album_ext = await catalog_queue.resolve_id(
+            db, "album", p["album_ext_id"], match_name=p["album_name"]
+        )
+        await catalog_queue.enqueue("album", {
+            "id": album_id,
+            "external_id": album_ext,
+            "title": p["album_name"],
+            "seokey": p["album_seokey"],
+            "cover_url": p["thumbnail_url"],
+            "artist_id": artist_id,
+            "artist_name": p["primary_artist"],
+        })
+
+        song_id, song_ext = await catalog_queue.resolve_id(db, "song", p["seokey"])
+        values = {
+            "id": song_id,
+            "external_id": song_ext,
+            "title": p["title"],
+            "artist_id": artist_id,
+            "artist_name": p["artist_name"],
+            "album_id": album_id,
+            "album_name": p["album_name"],
+            "duration": p["duration"],
+            "thumbnail_url": p["thumbnail_url"],
+            "audio_url": p["audio_url"],
+            "stream_urls": p["stream_urls"],
+            "source": "gaana",
+            "language": p["language"] or "English",
+            "genre": p["genre"] or "Pop",
+            "mood": p["mood"] or "Chill",
+            "is_explicit": p["is_explicit"],
+        }
+        await catalog_queue.enqueue("song", values)
+
+        # Transient: deliberately not added to `db`, so the session never tries
+        # to write it a second time. It carries every column the response
+        # schemas read, and created_at -- which the row will get from the
+        # server default -- is filled in so a freshly queued song does not
+        # serialize with a null timestamp.
+        song = Song(**values, play_count=0)
+        song.created_at = song.updated_at = utcnow()
         return song
 
     async def get_languages(self) -> List[str]:
@@ -273,6 +408,11 @@ class CatalogService:
         """
         if not cached_ids:
             return []
+        # These ids were handed out before their rows were written, so a cache
+        # entry made in the last flush interval can point at rows that are
+        # still queued. Flushing first is what keeps a cache hit from silently
+        # returning fewer songs than it cached.
+        await catalog_queue.ensure_persisted(db, *[str(sid) for sid in cached_ids])
         rows = (await db.execute(select(Song).where(Song.id.in_(cached_ids)))).scalars().all()
         by_id = {str(row.id): row for row in rows}
         return [by_id[str(sid)] for sid in cached_ids if str(sid) in by_id]
@@ -414,6 +554,10 @@ class CatalogService:
         # "simtaangaran". Song.id is a native uuid on PostgreSQL, so only
         # compare against it when the value actually parses -- otherwise the
         # bind raises and an unknown song 500s instead of 404ing.
+        # A song the queue has not written yet has no row to find, so flush
+        # first if this id is one of those. No-op otherwise.
+        await catalog_queue.ensure_persisted(db, song_id)
+
         conditions = [Song.external_id == song_id]
         if is_uuid(song_id):
             conditions.append(Song.id == song_id)

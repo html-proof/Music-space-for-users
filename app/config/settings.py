@@ -200,6 +200,19 @@ class Settings(BaseSettings):
     # rather than compete with request handling in-process.
     RELEASE_WATCH_ENABLED: bool = False
     RELEASE_WATCH_INTERVAL_MINUTES: int = 180
+
+    # Catalog write queue (app/services/catalog_queue.py). Every Gaana track a
+    # search or feed touches used to cost three synchronous round trips plus a
+    # COMMIT inside the request; queueing them and flushing in one batched
+    # upsert keeps that off the request path. The flusher also enforces the
+    # album cap below, so the catalog stays a bounded cache rather than an
+    # ever-growing mirror of Gaana.
+    CATALOG_WRITE_QUEUE_ENABLED: bool = True
+    CATALOG_FLUSH_INTERVAL_SECONDS: int = 120
+    # Most-recently-touched albums to keep. Older ones are deleted on each
+    # flush pass, except any a user still references (saved album, or a song of
+    # theirs that is liked / in a playlist / in history / downloaded).
+    CATALOG_MAX_ALBUMS: int = 20000
     # Fraction of each shelf given to unheard songs. Zero makes the feed
     # self-reinforcing: the ranker never sees evidence about songs it scores low.
     ML_EXPLORATION_RATE: float = 0.10
