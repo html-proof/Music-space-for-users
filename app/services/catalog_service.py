@@ -380,5 +380,72 @@ class CatalogService:
             await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
         return songs
 
+    async def get_artist_top_songs(self, db: AsyncSession, artist_name_or_id: str, limit: int = 10) -> List[Song]:
+        cache_key = f"catalog:artist_songs:{artist_name_or_id}:{limit}"
+        cached = await cache_service.get_json(cache_key)
+        if cached:
+            stmt = select(Song).where(Song.id.in_(cached))
+            res = await db.execute(stmt)
+            return list(res.scalars().all())
+
+        results = None
+        try:
+            results = await asyncio.wait_for(
+                self.gaana.search_songs(artist_name_or_id, limit),
+                timeout=TRENDING_FETCH_TIMEOUT_SECONDS
+            )
+        except Exception:
+            logger.warning("artist songs fetch for %s timed out/failed", artist_name_or_id, exc_info=True)
+
+        songs: List[Song] = []
+        if isinstance(results, list):
+            for raw in results:
+                if isinstance(raw, dict) and "seokey" in raw:
+                    song = await self.upsert_gaana_song(db, raw)
+                    songs.append(song)
+
+        if not songs:
+            stmt = select(Song).where(Song.artist_name.ilike(f"%{artist_name_or_id}%")).order_by(Song.play_count.desc()).limit(limit)
+            res = await db.execute(stmt)
+            songs = list(res.scalars().all())
+
+        if songs:
+            await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
+        return songs
+
+    async def get_genre_or_mood_songs(self, db: AsyncSession, query: str, language: Optional[str] = None, limit: int = 10) -> List[Song]:
+        search_term = f"{query} {language}".strip() if language else query
+        cache_key = f"catalog:genre_mood:{search_term}:{limit}"
+        cached = await cache_service.get_json(cache_key)
+        if cached:
+            stmt = select(Song).where(Song.id.in_(cached))
+            res = await db.execute(stmt)
+            return list(res.scalars().all())
+
+        results = None
+        try:
+            results = await asyncio.wait_for(
+                self.gaana.search_songs(search_term, limit),
+                timeout=TRENDING_FETCH_TIMEOUT_SECONDS
+            )
+        except Exception:
+            logger.warning("genre/mood fetch for %s timed out/failed", search_term, exc_info=True)
+
+        songs: List[Song] = []
+        if isinstance(results, list):
+            for raw in results:
+                if isinstance(raw, dict) and "seokey" in raw:
+                    song = await self.upsert_gaana_song(db, raw)
+                    songs.append(song)
+
+        if not songs:
+            stmt = select(Song).where(or_(Song.genre.ilike(f"%{query}%"), Song.mood.ilike(f"%{query}%"))).order_by(Song.play_count.desc()).limit(limit)
+            res = await db.execute(stmt)
+            songs = list(res.scalars().all())
+
+        if songs:
+            await cache_service.set_json(cache_key, [s.id for s in songs], ttl_seconds=1800)
+        return songs
+
 
 catalog_service = CatalogService()

@@ -31,6 +31,22 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 # word", and the bounded DP below can bail out early.
 MAX_EDIT_DISTANCE = 2
 
+# A flat MAX_EDIT_DISTANCE=2 tolerance, gated only at len(token) >= 4, let a
+# short word fuzzy-match an entirely different short word: "sakar" is exactly
+# 1 edit from "safar" (k->f), so it fuzzy-matched and outranked the real
+# "Sakar" result; "pattalam" is exactly 2 edits from "pattellam", a different
+# word, not a typo of it. Below MIN_FUZZY_TOKEN_LENGTH a token skips fuzzy
+# matching entirely -- on a short word there are too many unrelated real
+# words within 1-2 edits for that distance to mean "probably a typo". Longer
+# tokens still get a length-scaled tolerance.
+MIN_FUZZY_TOKEN_LENGTH = 7
+
+
+def _fuzzy_tolerance(token_length: int) -> int:
+    if token_length <= 8:
+        return 1
+    return MAX_EDIT_DISTANCE
+
 
 def _norm(text: Optional[str]) -> str:
     return (text or "").strip().lower()
@@ -106,8 +122,9 @@ def field_lexical_score(query: str, value: Optional[str]) -> float:
         if any(vt.startswith(token) for vt in v_tokens):
             matched += 1
             continue
-        if len(token) >= 4 and any(
-            bounded_edit_distance(token, vt) <= MAX_EDIT_DISTANCE for vt in v_tokens
+        tolerance = _fuzzy_tolerance(len(token))
+        if len(token) >= MIN_FUZZY_TOKEN_LENGTH and any(
+            bounded_edit_distance(token, vt, tolerance) <= tolerance for vt in v_tokens
         ):
             fuzzy_matched += 1
 

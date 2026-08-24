@@ -351,46 +351,89 @@ class RecommendationService:
         db: AsyncSession,
         user_id: str,
     ) -> Tuple[List[RecommendationCategoryResponse], List[Song]]:
-        """The pre-ML shelves, kept intact as the ML_ENABLED=False path."""
+        """Builds shelves dynamically by fetching personalized tracks from Gaana."""
         affinities = await RecommendationService.calculate_user_affinities(db, user_id)
         categories: List[RecommendationCategoryResponse] = []
 
-        # top_languages was computed above but never consulted here -- a
-        # declared/observed language preference is at least as strong a
-        # signal as genre, so it filters made_for_you the same way.
+        top_languages = affinities.get("top_languages", [])
+        primary_language = top_languages[0] if top_languages else "Hindi"
+        top_artists = affinities.get("top_artists", [])
+        top_genres = affinities.get("top_genres", [])
+
+        # 1. Made For You: Curated mix of user's favorite artists & preferred language hits from Gaana
         made_for_you_songs: List[Song] = []
-        filters = []
-        if affinities["top_genres"]:
-            filters.append(Song.genre.in_(affinities["top_genres"][:3]))
-        if affinities["top_languages"]:
-            filters.append(Song.language.in_(affinities["top_languages"][:3]))
+        seen_ids: Set[str] = set()
 
-        if filters:
-            stmt = select(Song).where(and_(*filters)).order_by(Song.play_count.desc()).limit(SHELF_SIZE)
-            made_for_you_songs = list((await db.execute(stmt)).scalars().all())
-            if not made_for_you_songs and len(filters) > 1:
-                # Genre + language together may be too narrow on a small
-                # catalog -- relax to language alone, the stronger signal.
-                stmt = (
-                    select(Song)
-                    .where(Song.language.in_(affinities["top_languages"][:3]))
-                    .order_by(Song.play_count.desc())
-                    .limit(SHELF_SIZE)
-                )
-                made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+        # Fetch from Gaana for top artists
+        for artist in top_artists[:3]:
+            try:
+                artist_songs = await catalog_service.get_artist_top_songs(db, artist, limit=4)
+                for s in artist_songs:
+                    if str(s.id) not in seen_ids:
+                        if not top_languages or s.language in top_languages:
+                            seen_ids.add(str(s.id))
+                            made_for_you_songs.append(s)
+            except Exception as e:
+                logger.warning("Failed to fetch Gaana songs for artist %s: %s", artist, e)
 
+        # If still need songs, fetch from Gaana in user's preferred language(s)
+        if len(made_for_you_songs) < SHELF_SIZE:
+            fetch_langs = top_languages[:2] if top_languages else [primary_language]
+            for lang in fetch_langs:
+                try:
+                    lang_songs = await catalog_service.get_trending(db, lang, limit=SHELF_SIZE)
+                    for s in lang_songs:
+                        if str(s.id) not in seen_ids:
+                            if not top_languages or s.language in top_languages:
+                                seen_ids.add(str(s.id))
+                                made_for_you_songs.append(s)
+                        if len(made_for_you_songs) >= SHELF_SIZE:
+                            break
+                except Exception as e:
+                    logger.warning("Failed to fetch Gaana trending for %s: %s", lang, e)
+
+        # Fallback to local DB heuristics if Gaana returned no matching songs
         if not made_for_you_songs:
-            stmt = select(Song).order_by(Song.play_count.desc()).limit(SHELF_SIZE)
-            made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+            filters = []
+            if top_genres:
+                filters.append(Song.genre.in_(top_genres[:3]))
+            if top_languages:
+                filters.append(Song.language.in_(top_languages[:3]))
+
+            if filters:
+                stmt = select(Song).where(and_(*filters)).order_by(Song.play_count.desc()).limit(SHELF_SIZE)
+                made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+                if not made_for_you_songs and len(filters) > 1 and top_languages:
+                    stmt = (
+                        select(Song)
+                        .where(Song.language.in_(top_languages[:3]))
+                        .order_by(Song.play_count.desc())
+                        .limit(SHELF_SIZE)
+                    )
+                    made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+
+            if not made_for_you_songs:
+                if top_languages:
+                    stmt = select(Song).where(Song.language.in_(top_languages)).order_by(Song.play_count.desc()).limit(SHELF_SIZE)
+                    made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+                if not made_for_you_songs:
+                    stmt = select(Song).order_by(Song.play_count.desc()).limit(SHELF_SIZE)
+                    made_for_you_songs = list((await db.execute(stmt)).scalars().all())
+
+        if top_languages:
+            filtered = [s for s in made_for_you_songs if s.language in top_languages]
+            if filtered:
+                made_for_you_songs = filtered
 
         categories.append(RecommendationCategoryResponse(
             id="made_for_you",
             title="Made For You",
             description="Personalized based on your unique listening habits",
             category_type="made_for_you",
-            items=made_for_you_songs,
+            items=made_for_you_songs[:SHELF_SIZE],
         ))
 
+        # 2. Recently Played
         recent_songs = await RecommendationService._recently_played(db, user_id)
         if recent_songs:
             categories.append(RecommendationCategoryResponse(
@@ -401,36 +444,46 @@ class RecommendationService:
                 items=recent_songs,
             ))
 
-        if affinities["top_artists"]:
-            fav_artist = affinities["top_artists"][0]
-            artist_stmt = select(Song).where(Song.artist_name.ilike(f"%{fav_artist}%")).limit(SHELF_SIZE)
-            artist_songs = list((await db.execute(artist_stmt)).scalars().all())
+        # 3. Because You Listened To <Artist>
+        if top_artists:
+            fav_artist = top_artists[0]
+            artist_songs = await catalog_service.get_artist_top_songs(db, fav_artist, limit=SHELF_SIZE)
+            if not artist_songs:
+                artist_stmt = select(Song).where(Song.artist_name.ilike(f"%{fav_artist}%")).limit(SHELF_SIZE)
+                artist_songs = list((await db.execute(artist_stmt)).scalars().all())
             if artist_songs:
                 categories.append(RecommendationCategoryResponse(
                     id="because_you_listened_to",
                     title=f"Because You Listened To {fav_artist}",
                     description=f"Similar hits and deeper cuts from {fav_artist}",
                     category_type="because_you_listened_to",
-                    items=artist_songs,
+                    items=artist_songs[:SHELF_SIZE],
                 ))
 
-        try:
-            daily_songs = list(
-                (await db.execute(select(Song).order_by(func.random()).limit(SHELF_SIZE)))
-                .scalars().all()
-            )
-        except Exception:
-            daily_songs = list((await db.execute(select(Song).limit(SHELF_SIZE))).scalars().all())
+        # 4. Daily Mix: Fresh blend of genres and languages from Gaana
+        daily_songs: List[Song] = []
+        if top_genres:
+            daily_songs = await catalog_service.get_genre_or_mood_songs(db, top_genres[0], primary_language, limit=SHELF_SIZE)
+        if not daily_songs:
+            daily_songs = await catalog_service.get_new_releases(db, primary_language, limit=SHELF_SIZE)
+        if not daily_songs:
+            try:
+                daily_songs = list(
+                    (await db.execute(select(Song).order_by(func.random()).limit(SHELF_SIZE)))
+                    .scalars().all()
+                )
+            except Exception:
+                daily_songs = list((await db.execute(select(Song).limit(SHELF_SIZE))).scalars().all())
 
         categories.append(RecommendationCategoryResponse(
             id="daily_mix",
             title="Your Daily Mix",
             description="A fresh blend of your favorite genres and new discoveries",
             category_type="daily_mix",
-            items=daily_songs,
+            items=daily_songs[:SHELF_SIZE],
         ))
 
-        return categories, made_for_you_songs
+        return categories, made_for_you_songs[:SHELF_SIZE]
 
     @staticmethod
     async def _recently_played(db: AsyncSession, user_id: str, limit: int = SHELF_SIZE) -> List[Song]:
@@ -539,18 +592,16 @@ class RecommendationService:
     # -------------------------------------------------------------- similar songs
 
     @staticmethod
-    async def get_similar_songs(db: AsyncSession, song_id: str, limit: int = 10) -> List[Song]:
-        """Songs similar to `song_id`: content kNN blended with item-item CF.
-
-        Item-to-item and therefore user-independent, which is what makes it
-        cacheable across users and usable for an anonymous listener.
-        """
+    async def get_similar_songs(
+        db: AsyncSession,
+        song_id: str,
+        limit: int = 10,
+        allow_network: bool = True
+    ) -> List[Song]:
+        """Songs similar to `song_id`: fetched live from Gaana with local fallback."""
         target_song = await catalog_service.get_song_by_id(db, song_id)
         if not target_song:
             return []
-
-        if not settings.ML_ENABLED:
-            return await RecommendationService._heuristic_similar(db, target_song, limit)
 
         cache_key = similar_songs_key(str(target_song.id), limit)
         cached = await cache_service.get_json(cache_key)
@@ -561,53 +612,76 @@ class RecommendationService:
             if ordered:
                 return ordered
 
-        try:
-            from app.ml import candidates as ml_candidates
-            from app.ml import diversify, ranker as ml_ranker
-            from app.ml.features import UserState, song_vector
-            from app.ml.user_state import load_song_stats, max_play_count
+        # Fetch similar songs from Gaana if network is allowed
+        similar_songs: List[Song] = []
+        seen_ids: Set[str] = {str(target_song.id)}
 
-            pool = await ml_candidates.for_seed_song(db, target_song, limit=max(limit * 20, 100))
-            if len(pool) == 0:
-                return await RecommendationService._heuristic_similar(db, target_song, limit)
+        if allow_network and target_song.artist_name:
+            try:
+                artist_tracks = await catalog_service.get_artist_top_songs(db, target_song.artist_name, limit=limit)
+                for s in artist_tracks:
+                    if str(s.id) not in seen_ids:
+                        seen_ids.add(str(s.id))
+                        similar_songs.append(s)
+            except Exception as e:
+                logger.warning("Similar songs Gaana artist search failed: %s", e)
 
-            # A synthetic single-song "user": the seed's own content vector as the
-            # taste vector. This reuses the full ranker -- including popularity and
-            # global completion rate -- for an item-to-item query, instead of
-            # ranking on raw cosine alone.
-            seed_state = UserState(
-                user_id="",
-                as_of=datetime.now().astimezone(),
-                taste_vector=song_vector(target_song),
-                preferred_languages={(target_song.language or "").strip().lower()} - {""},
-            )
-            stats = await load_song_stats(db, list(pool.songs.keys()))
-            active_ranker = await ml_ranker.load_ranker(db)
-            scored = active_ranker.rank(
-                pool.song_list(), seed_state,
-                sources=pool.source_map(), cf_scores=pool.cf_scores,
-                stats=stats, max_play_count=await max_play_count(db), vectors=pool.vectors,
-            )
-            picked = diversify.finalize(
-                scored, limit=limit, exclude_ids={str(target_song.id)},
-                max_per_artist=3, exploration_rate=0.0,
-            )
-            songs = [s.song for s in picked]
-        except Exception:
-            logger.exception("ML similar-songs failed for %s; falling back", song_id)
-            return await RecommendationService._heuristic_similar(db, target_song, limit)
+        if allow_network and len(similar_songs) < limit and target_song.genre:
+            try:
+                genre_tracks = await catalog_service.get_genre_or_mood_songs(
+                    db, target_song.genre, target_song.language, limit=limit
+                )
+                for s in genre_tracks:
+                    if str(s.id) not in seen_ids:
+                        seen_ids.add(str(s.id))
+                        similar_songs.append(s)
+            except Exception as e:
+                logger.warning("Similar songs Gaana genre search failed: %s", e)
 
-        if not songs:
-            return await RecommendationService._heuristic_similar(db, target_song, limit)
+        # Fallback to ML / DB heuristics if Gaana search produced no candidates or network is disabled
+        if not similar_songs:
+            if settings.ML_ENABLED:
+                try:
+                    from app.ml import candidates as ml_candidates
+                    from app.ml import diversify, ranker as ml_ranker
+                    from app.ml.features import UserState, song_vector
+                    from app.ml.user_state import load_song_stats, max_play_count
 
-        try:
-            await cache_service.set_json(
-                cache_key, [str(s.id) for s in songs],
-                ttl_seconds=settings.RECOMMENDATION_CACHE_TTL_SECONDS,
-            )
-        except Exception:
-            logger.debug("failed to cache similar songs for %s", song_id, exc_info=True)
-        return songs
+                    pool = await ml_candidates.for_seed_song(db, target_song, limit=max(limit * 20, 100))
+                    if len(pool) > 0:
+                        seed_state = UserState(
+                            user_id="",
+                            as_of=datetime.now().astimezone(),
+                            taste_vector=song_vector(target_song),
+                            preferred_languages={(target_song.language or "").strip().lower()} - {""},
+                        )
+                        stats = await load_song_stats(db, list(pool.songs.keys()))
+                        active_ranker = await ml_ranker.load_ranker(db)
+                        scored = active_ranker.rank(
+                            pool.song_list(), seed_state,
+                            sources=pool.source_map(), cf_scores=pool.cf_scores,
+                            stats=stats, max_play_count=await max_play_count(db), vectors=pool.vectors,
+                        )
+                        picked = diversify.finalize(
+                            scored, limit=limit, exclude_ids={str(target_song.id)},
+                            max_per_artist=3, exploration_rate=0.0,
+                        )
+                        similar_songs = [s.song for s in picked]
+                except Exception:
+                    pass
+
+        if not similar_songs:
+            similar_songs = await RecommendationService._heuristic_similar(db, target_song, limit)
+
+        if similar_songs and allow_network:
+            try:
+                await cache_service.set_json(
+                    cache_key, [str(s.id) for s in similar_songs[:limit]],
+                    ttl_seconds=settings.RECOMMENDATION_CACHE_TTL_SECONDS,
+                )
+            except Exception:
+                logger.debug("failed to cache similar songs for %s", song_id, exc_info=True)
+        return similar_songs[:limit]
 
     @staticmethod
     async def _heuristic_similar(db: AsyncSession, target_song: Song, limit: int) -> List[Song]:
@@ -626,14 +700,30 @@ class RecommendationService:
 
     @staticmethod
     async def get_mood_mix(db: AsyncSession, mood: str, limit: int = 20) -> List[Song]:
-        stmt = select(Song).where(Song.mood.ilike(f"%{mood}%")).order_by(Song.play_count.desc()).limit(limit)
-        res = await db.execute(stmt)
-        songs = list(res.scalars().all())
+        cache_key = f"catalog:mood:{mood}:{limit}"
+        cached = await cache_service.get_json(cache_key)
+        if cached:
+            stmt = select(Song).where(Song.id.in_(cached))
+            res = await db.execute(stmt)
+            return list(res.scalars().all())
+
+        songs: List[Song] = []
+        try:
+            songs = await catalog_service.get_genre_or_mood_songs(db, mood, limit=limit)
+        except Exception as e:
+            logger.warning("Mood mix Gaana fetch failed: %s", e)
+
         if not songs:
-            # Fallback to general songs
-            res = await db.execute(select(Song).limit(limit))
+            stmt = select(Song).where(Song.mood.ilike(f"%{mood}%")).order_by(Song.play_count.desc()).limit(limit)
+            res = await db.execute(stmt)
             songs = list(res.scalars().all())
-        return songs
+            if not songs:
+                res = await db.execute(select(Song).limit(limit))
+                songs = list(res.scalars().all())
+
+        if songs:
+            await cache_service.set_json(cache_key, [str(s.id) for s in songs[:limit]], ttl_seconds=1800)
+        return songs[:limit]
 
 
 recommendation_service = RecommendationService()

@@ -204,7 +204,7 @@ class RadioService:
         pool = max(limit * 3, limit)
 
         if seed_type == "song" and seed_id:
-            songs = await RecommendationService.get_similar_songs(db, seed_id, limit=pool)
+            songs = await RecommendationService.get_similar_songs(db, seed_id, limit=pool, allow_network=allow_network)
             if allow_network and len(songs) < limit:
                 songs = songs + await RadioService._upstream_for_song(db, seed_id, pool)
             return songs
