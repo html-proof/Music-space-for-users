@@ -1,5 +1,22 @@
 import asyncio
 
+# Gaana sits behind Akamai, which answers a burst of parallel requests with
+# 403s. An album's tracks used to be re-fetched one songDetail request each,
+# all at once, so a 20-track album fired 20+ requests in the same instant: some
+# came back denied and those tracks were dropped without a trace, and once the
+# limiter had tripped the album came back with no tracks at all.
+#
+# albumDetail already returns every track in full, stream URLs included, so
+# nothing normally needs fetching. This bounds the fallback for the entries
+# that do arrive incomplete.
+TRACK_DETAIL_CONCURRENCY = 4
+
+
+def _has_stream(track: dict) -> bool:
+    urls = track.get('urls')
+    medium = urls.get('medium') if isinstance(urls, dict) else None
+    return isinstance(medium, dict) and bool(medium.get('message'))
+
 
 class Albums:
     async def search_albums(self, search_query: str, limit: int) -> list:
@@ -40,13 +57,66 @@ class Albums:
         result = await self._safe_request("POST", endpoints.album_details_url + album_id)
         if isinstance(result, dict) and "error" in result:
             return result
-        track_seokeys = []
-        for i in result.get('tracks', []):
-            seo = i.get('seokey') if isinstance(i, dict) else None
-            if seo:
-                track_seokeys.append(seo)
-        result = await self.get_track_info(track_seokeys)
-        return result
+        tracks = await self.format_album_tracks(result)
+        if len(tracks) == 0:
+            return await self.errors.no_results()
+        return tracks
+
+    async def format_album_tracks(self, result: dict) -> list:
+        """The tracks of one albumDetail response, in album order.
+
+        Formatted straight from the response wherever it describes the track in
+        full. Only an entry with no stream payload costs a songDetail request,
+        and a failed one costs that track its stream URL rather than its place
+        in the list. Always a list, empty when the album names no tracks.
+        """
+        endpoints = self.api_endpoints
+        raw_tracks = [
+            track for track in (result.get('tracks') or [])
+            if isinstance(track, dict) and track.get('seokey')
+        ]
+
+        incomplete = list(dict.fromkeys(
+            track['seokey'] for track in raw_tracks if not _has_stream(track)
+        ))
+        detailed = {}
+        if incomplete:
+            limiter = asyncio.Semaphore(TRACK_DETAIL_CONCURRENCY)
+
+            async def fetch(seokey: str) -> dict:
+                async with limiter:
+                    return await self._safe_request("POST", endpoints.song_details_url + seokey)
+
+            responses = await asyncio.gather(*[fetch(seokey) for seokey in incomplete])
+            for seokey, response in zip(incomplete, responses):
+                found = response.get('tracks') if isinstance(response, dict) else None
+                if found and isinstance(found[0], dict) and found[0].get('seokey'):
+                    detailed[seokey] = found[0]
+
+        album = result.get('album')
+        album_label = album.get('recordlevel', '') if isinstance(album, dict) else ''
+
+        tracks = []
+        for raw in raw_tracks:
+            source = detailed.get(raw['seokey'])
+            if source is None:
+                if not raw.get('track_title'):
+                    # A bare reference whose detail lookup failed: nothing to show.
+                    continue
+                source = raw
+            track = await self.format_json_songs(source)
+            if "error" in track:
+                continue
+            # songDetail carries these two per track; albumDetail carries the
+            # label on the album and the artist image on the credit instead.
+            if not track.get('label'):
+                track['label'] = album_label or ''
+            if not track.get('artist_image'):
+                credits = source.get('artist')
+                first = credits[0] if isinstance(credits, list) and credits else None
+                track['artist_image'] = first.get('atw', '') if isinstance(first, dict) else ''
+            tracks.append(track)
+        return tracks
 
     async def format_json_albums(self, results: dict, info: bool = False) -> dict:
         functions = self.functions
@@ -94,5 +164,12 @@ class Albums:
         data['images']['urls']['small_artwork'] = artwork
 
         if info:
-            data['tracks'] = await self.get_album_tracks(data['seokey'])
+            if isinstance(results.get('tracks'), list):
+                # The response in hand already lists the tracks; fetching the
+                # album a second time only to read them back doubled the load.
+                data['tracks'] = await self.format_album_tracks(results)
+            else:
+                tracks = await self.get_album_tracks(data['seokey'])
+                # Never an error dict: clients iterate this.
+                data['tracks'] = tracks if isinstance(tracks, list) else []
         return data
