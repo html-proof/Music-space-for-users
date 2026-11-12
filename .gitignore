@@ -11,3 +11,9 @@ firebase-credentials.json
 render_upload.env
 *.env
 !.env.example
+
+# Firebase client config (holds the project's API key). This repo is public
+# and backend-only, so these must never be committed here.
+google-services.json
+GoogleService-Info.plist
+firebase_options.dart
